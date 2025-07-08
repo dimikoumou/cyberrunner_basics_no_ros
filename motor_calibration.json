@@ -1,0 +1,10 @@
+{
+    "motor1_id": 1,
+    "motor1_center_position": 2761,
+    "motor1_min_position": 1961,
+    "motor1_max_position": 4000,
+    "motor2_id": 2,
+    "motor2_center_position": 2003,
+    "motor2_min_position": 1403,
+    "motor2_max_position": 4000
+}

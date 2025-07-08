@@ -1,0 +1,250 @@
+todo.txt
+
+
+
+1. implement the 
+ class OpencVMODEl:
+#     """has to have similar interface as the OcamModel class. in particular the world2cam and cam2world functions, but be based o the OPENCV calibration. 
+    
+2. use this class in the      subsstitute in plate_pose and measurements files.
+    
+    
+3. recall the warning: 
+    whatever i pass rto the estimation pipeline the resolution has to be the same as during the calibration. the world 2 cam functions depend on it!!! 
+    
+    
+4. test with  no ros file. (it impoets from the EstimationPipeline -- there might be a bit of ROS. )
+        this loop is actually the frame capturing one.
+
+#####
+
+
+notes: 
+
+what does OcamCalib file contain? 
+
+============ calib from github: =========
+#polynomial coefficients for the DIRECT mapping function (ocam_model.ss in MATLAB). These are used by cam2world
+
+5 -1.039121e+03 0.000000e+00 2.691087e-04 2.010848e-07 -7.252130e-11 
+
+#polynomial coefficients for the inverse mapping function (ocam_model.invpol in MATLAB). These are used by world2cam
+
+8 1591.697024 1225.708868 546.302676 502.415591 322.029177 256.157188 140.485896 29.168972 
+
+#center: "row" and "column", starting from 0 (C convention)
+
+614.883002 927.803988
+
+#affine parameters "c", "d", "e"
+
+1.000656 -0.000186 0.000525
+
+#image size: "height" and "width"
+
+1200 1920
+
+
+how do we use them in the cam2world or world2cam? 
+1. we read them out once, when initializing the world model: 
+
+-> this is how we parse through the calib result:
+calib_txt = calib_txt.splitlines()
+
+        self.ss = np.fromstring(calib_txt[2], sep=" ")[1:] # so this is  -1.039121e+03 0.000000e+00 2.691087e-04 2.010848e-07 -7.252130e-11 
+
+        -- why do we discard the first coefficient???? 
+        
+        self.inv_ss = np.fromstring(calib_txt[6], sep=" ")[1:] # this is:  591.697024 1225.708868 546.302676 502.415591 322.029177 256.157188 140.485896 29.168972 
+        self.xc, self.yc = np.fromstring(calib_txt[10], sep=" ") # this is the position of the center. 
+        self.c, self.d, self.e = np.fromstring(calib_txt[14], sep=" ") # affine
+        self.a = np.array([[self.c, self.d], 
+                            [self.e, 1.0]])
+        self.a_inv = np.linalg.inv(self.a) 
+        self.height, self.width = np.fromstring(calib_txt[18], sep=" ")
+
+2. how do we use them in the cam2world function? 
+
+
+def cam2world(self, img_points): # TODO: need to be repaced with OpenCV calibration equvalent. 
+        """Converts 2D pixel coordinate into a 3D vector emanating from the
+        single effective viewpoint of the camera.
+
+        Parameters
+        ----------
+        img_points : array_like, shape (N, 2) or (2,)
+            Each row is a 2D point in (u, v) format.
+        Returns
+        -------
+        world_points : numpy.ndarray, shape (N, 3) or (3,)
+            Each row is a 3D point in (x, y, z) format.
+
+        """
+        img_points = np.asarray(img_points)
+        is1d = img_points.ndim == 1
+        if is1d:
+            img_points = np.reshape(img_points, (-1, 2))
+
+        world_points = np.empty((img_points.shape[0], 3))
+        world_points[:, :2] = (
+            self.a_inv @ (img_points - np.array([self.xc, self.yc])).T
+        ).T
+
+        # so it's w_p = A^{-1} @ ((u,v) - (X_c, y_c)) 
+        
+        r = np.linalg.norm(world_points[:, :2], axis=1)
+        # next step is to get the norm 
+
+        world_points[:, 2] = polyval(r, self.ss)  # z <- value of the polynomial at points r (norm)
+
+        # Normalize 
+        world_points /= np.linalg.norm(world_points, axis=1, keepdims=True) # so we make sure the 3d point lies on the uinit sphere. even when (x_c, y_c) arent at the center????
+
+        if is1d:
+            world_points = world_points.reshape((-1,))
+
+        return world_points
+
+
+############################################################################################################
+
+okay this makes some sense. let's rewrite it with the available camera calibration. 
+
+
+
+
+######change of plans: use py_OcamCalib instead? ####
+
+need to unerstand how to build using it. 
+
+
+
+they do provide us with a setup .py file. i only have to test and run it. 
+
+also this should have the same format as the matlab library
+
+
+aaaaaaaaa IM A BIT STUCK NGL. why can i not find the calibration_script.py???
+
+
+#####################################################
+
+
+
+########### this is the calibration script. I need to adapt it so that it works with Aswin's clean sound-based calibration file,
+and with Thoma's state estmation. 
+
+-> the Aswin - pyocamcalib shouldn't be too hard. 
+    i need to understand how to call pyocamcalib's calibration on a new set of images, and then just change Aswin's code a litte.
+
+-> the pyocamcalib - Thomas's state estimation bridge shouldn't be too terrible.
+ The output of the calibration is a json file, I just need to write a function that will adapt its output to the same format as 
+ Thomas's calibration data (row based with marks for comments. )
+
+NOTE: the important file from the py-ocacalib model is the  pyocamcalib.modelling.calibration import CalibrationEngine 
+-----> i cant really just work with the calibration.py file - it imports a ton of functions from the core and utils folders of course. 
+
+
+from pyocamcalib.modelling.calibration import CalibrationEngine
+import typer
+
+
+def main(working_dir: str,
+         chessboard_size_row: int,
+         chessboard_size_column: int,
+         corners_path: str = None,
+         check: bool = False,
+         camera_name: str = "MyCamera",
+         square_size: float = 1):
+
+    """
+    :param chessboard_size_row: Number of INNER corners per a chessboard on a row \n
+    :param chessboard_size_column: Number of INNER corners per a chessboard on a column \n
+    :param working_dir: Path to the folder which contains all the chessboard pattern of your camera.\n
+    :param corners_path: If None perform detection. Otherwise, detection is skipped and calibration is done with corners
+    saved inside file at corners_path.
+    :param check: If True, manual corners annotations can be performed in addition to automatic detection to prevent
+    potential miss detection.\n
+    :param camera_name: name of your camera.\n
+    :param square_size: size of a chessboard square side. If you don't know this size, calibration will be done in
+    chessboard square unit. Otherwise, if chessboard square side is 30 mm for example, calibration will be done in mm.
+    :return:
+    """
+
+    chessboard_size = (chessboard_size_row, chessboard_size_column)
+    my_calib_engine = CalibrationEngine(working_dir, chessboard_size, camera_name, square_size)
+
+    if corners_path is None:
+        my_calib_engine.detect_corners(check=check)
+        my_calib_engine.save_detection()
+    else:
+        my_calib_engine.load_detection(corners_path)
+
+    my_calib_engine.estimate_fisheye_parameters()
+    my_calib_engine.find_poly_inv()
+    my_calib_engine.save_calibration()
+    my_calib_engine.show_model_projection()
+    my_calib_engine.show_reprojection_error()
+    my_calib_engine.show_reprojection()
+
+
+if __name__ == "__main__":
+    typer.run(main)
+
+
+############# 
+
+
+
+Monday 31.03.
+
+Ask Thomas about:
+1. if the line (56, state_est.py):         # frame = cv.resize(frame, (int(width/3), int(height/3))) # why are we resizing here?
+is needed. it seems to deform the image quite a bit. 
+
+2. if the mask == None should be mask.all() or mask.any(). without it im getting an error.
+
+
+also why cant i find the marker?
+this is my current output.:
+
+
+captured frame of shape:  (1080, 1920, 3)
+ IM MASKING THE IMAGE OF SHAPE:  (24, 24, 3)
+ IM MASKING THE IMAGE OF SHAPE:  (24, 24, 3)
+MASK: no contour found for 1
+mask [[0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+ [0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+ [0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+ [0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+ [0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+ [0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+ [0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+ [0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+ [0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+ [0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+ [0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+ [0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+ [0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+ [0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+ [0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+ [0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+ [0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+ [0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+ [0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+ [0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+ [0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+ [0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+ [0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+ [0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]]
+Unable to find corner 2
+
+
+idea: display the subpart of the image where im looking for the marker?
+
+
+
+
+### 02.04. 
+
+gotta find a way to fix the focus length of the camera. otherwise the calibration settings change. it actually makes sense. what ifnth

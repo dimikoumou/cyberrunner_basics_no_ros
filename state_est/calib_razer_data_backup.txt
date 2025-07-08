@@ -1,0 +1,22 @@
+#polynomial coefficients for the DIRECT mapping function (ocam_model.ss in MATLAB). These are used by cam2world
+
+1 -1.039121e+03 
+
+#polynomial coefficients for the inverse mapping function (ocam_model.invpol in MATLAB). These are used by world2cam
+
+25  0.3711494700557881 -7.058833373989384 53.12009340122633 -178.29949918331505 89.37282942844014 1072.282160475181 -1639.6572750722016 -6562.6426796402575 15935.749491513137 36982.35996657862 -149452.23586183428 -77676.79327330663 1176868.182826232 -2367834.401407525 1172451.0073949052 3407830.563268926 -8097712.328914047 8752301.461612156 -5628999.819310401 2230314.563082622 -533289.85338556 74023.32415746775 -5073.361685932218 3236.5473624847746 -0.24220561981201172
+
+#center: "row" and "column",  starting from 0 (C convention)
+
+540 960
+#   NOTE: this was very very sus!!
+#affine parameters "c", "d", "e"
+
+1 0 0
+
+#image size: "height" and "width"
+
+1080 1920
+# could quantify the difference between this simplified calib and the estimation using the proper calib. 
+# scaling took 3 hours of my life. 
+# remove the print statents
