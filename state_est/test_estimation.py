@@ -1,22 +1,35 @@
 import cv2
 from board_estimation import EstimationPipeline
-
-# Load the test image
-frame = cv2.imread('../marked_image.jpg')
-
-# Create estimation pipeline
+frame = cv2.imread("board.png")
+# Create the estimation pipeline first
 pipeline = EstimationPipeline(
     fps=30,
     estimator="FiniteDiff",
-    print_measurements=True,  # This will print detailed measurements
-    show_image=True  # This will show the detection visualization
+    print_measurements=True,
+    show_image=True
 )
 
-# Run estimation
-x_hat, P, inputs, xb, yb = pipeline.estimate(frame)
+# # Start camera feed
+cap = cv2.VideoCapture(0)
 
-print("\nEstimation Results:")
-print(f"Ball position (x, y): ({xb:.3f}, {yb:.3f})")
-print(f"Plate angles (α, β): ({inputs[0]*180/3.14:.2f}, {inputs[1]*180/3.14:.2f}) degrees")
-print(f"State estimate (x_hat): {x_hat}")
-print(f"Covariance matrix (P):\n{P}")
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        print("Failed to grab frame")
+        break
+    cv2.imshow("Live Feed", frame)
+    # Run state estimation on every frame
+    x_hat, P, inputs, xb, yb = pipeline.estimate(frame)
+
+    # Optionally, draw or overlay stuff onto the frame here
+    # (But `pipeline` may already show stuff if show_image=True)
+
+    # Show original frame if needed (optional)
+    # 
+
+    # # Press 'q' to quit
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+         break
+
+cap.release()
+cv2.destroyAllWindows()

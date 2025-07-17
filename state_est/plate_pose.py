@@ -57,7 +57,7 @@ class PlatePoseEstimator:
         self.print_details = print_details
 
         # share = get_package_share_directory("cyberrunner_state_estimation")
-        o = OcamModel("calib_razer_data.txt")
+        o = OcamModel(os.path.join(os.path.dirname(__file__), "calib_razer_data.txt"))
         o.scale(3)  # From 1920 to 640 res # NOTE: this is critical for the correct estimation of the angles!!!! #TODO: should we automatically detect the scale?
         self.o = o
         xc, yc = o.xc, o.yc

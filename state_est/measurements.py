@@ -169,6 +169,7 @@ class Measurements:
         self.create_mask(frame)
 
     def create_mask(self, frame):
+        print("create_mask called")
         h, w = frame.shape[:2]
         coords = np.mgrid[0:h, 0:w].transpose(1, 2, 0).reshape(-1, 2)
         camera_points = self.plate_pose.o.cam2world(coords)[:, [1, 0, 2]]
@@ -193,6 +194,15 @@ class Measurements:
         )
         self.mask = 255 * mask.reshape(h, w, 1).astype(np.uint8)
 
+        cv2.imwrite("debug_board_mask.png", self.mask)
+        print("Saved mask as debug_board_mask.png")
+
+        # delete after 
+        print("Showing mask window...")
+        cv2.imshow("Board Mask", self.mask)
+        cv2.waitKey(0)
+        cv2.destroyWindow("Board Mask")
+        print("Destroying mask window")
     def ball_pos_backproject(self, ball_undist, K, T__C_M):
         """
         Compute the 3d position of the ball in the maze frame {m}.

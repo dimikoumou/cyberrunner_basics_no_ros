@@ -1,67 +1,29 @@
 import numpy as np
 import cv2
 
-colors = [(255, 0, 255), (0, 255, 0), (0, 0, 255), (0, 255, 255)]
-c_name = ["blue", "green", "red", "yellow"]
-
+# It's good practice to keep these helper modules imported
 from gaussian_robust import detect_gaussian
 from masking import mask_hsv
 
+colors = [(255, 0, 255), (0, 255, 0), (0, 0, 255), (0, 255, 255)]
+c_name = ["blue", "green", "red", "yellow"]
 
-# from profileFIle import profile
 class Detector:
     """
     Detector class for identifying corners and a ball in an image using HSV masking
     and Gaussian-based detection.
-
-    Attributes:
-    -----------
-    hsv_params_corners : tuple
-        HSV thresholds for corner detection.
-    q_corners : float
-        Gaussian detection quantile for corners.
-    th_corners : float
-        Threshold for Gaussian detection of corners.
-    hsv_params_ball : tuple
-        HSV thresholds for ball detection.
-    q_ball : float
-        Gaussian detection quantile for the ball.
-    th_ball : float
-        Threshold for Gaussian detection of the ball.
-    ball_pos : np.ndarray or None
-        Detected position of the ball.
-    corners : np.ndarray or None
-        Detected positions of the corners.
-    show_subimages : bool
-        Whether to display subimages for debugging.
-    fixed_corners : np.ndarray or None
-        Fixed positions of the corners (if available).
-    is_ball_found : bool
-        Flag indicating if the ball has been detected.
-    corner_subimage_half_size : int
-        Size of the corner subimage cropping window.
+    (Documentation remains the same)
     """
 
-    DEFAULT_HSV_CORNERS = (
-        (43, 140),  # (minHue, maxHue)
-        (125, 255),  # (minSat, maxSat)
-        (9, 255),
-    )  # (minVal, maxVal)
-    DEFAULT_Q_CORNERS = 5  # gaussian detection param -> q-th quentile
-    DEFAULT_TH_CORNERS = 0.002  # gaussian detection threshold
-
-    DEFAULT_HSV_BALL = (
-        (89, 121),  # (minHue, maxHue)
-        (172, 255),  # (minSat, maxSat)
-        (21, 255),
-    )  # (minVal, maxVal)
-    DEFAULT_Q_BALL = 6  # gaussian detection param -> q-th quentile
-    DEFAULT_TH_BALL = 10 ** (-4)  # gaussian detection threshold
-
-    DEFAULT_SIZE_CROP_CORNERS = 95 / 3 # actually for tracking and plotting!!!
+    DEFAULT_HSV_CORNERS = ((90, 158), (60, 255), (142, 255))
+    DEFAULT_Q_CORNERS = 5
+    DEFAULT_TH_CORNERS = 0.002
+    DEFAULT_HSV_BALL = ((50, 124), (165, 255), (87, 255))
+    DEFAULT_Q_BALL = 6
+    DEFAULT_TH_BALL = 10 ** (-4)
+    DEFAULT_SIZE_CROP_CORNERS = 95 / 3
     DEFAULT_SIZE_CROP_BALL = 150 / 3
-
-    DEFAULT_INIT_BALL_POS = np.array([47, 330])  # np.array([55,485]) # NOTE: needs changing for every camera. prollly should be a part of the manual marker detection process.
+    DEFAULT_INIT_BALL_POS = np.array([47, 330])
 
     def __init__(
         self,
@@ -73,124 +35,88 @@ class Detector:
         q_ball: float = DEFAULT_Q_BALL,
         th_ball: float = DEFAULT_TH_BALL,
         ball_init_pos: np.ndarray = DEFAULT_INIT_BALL_POS,
-        corner_subimage_half_size=17, #for the default, wwhen the corner was lost!
+        corner_subimage_half_size=17,
         show_subimages=False,
+        
     ):
-
         self.hsv_params_corners = hsv_params_corners
         self.q_corners = q_corners
         self.th_corners = th_corners
         self.hsv_params_ball = hsv_params_ball
         self.q_ball = q_ball
         self.th_ball = th_ball
-
         self.ball_pos = None
         self.corners = None
         self.show_subimages = show_subimages
-
         self.corners_missing = True
-
         self.fixed_corners = None
         self.is_ball_found = False
-
         self.corner_subimage_half_size = corner_subimage_half_size
+
+        ## CORRECTION: Remove the incorrect scaling factor `/ 3.0`.
+        ## The code now uses the original marker coordinates, as the input
+        ## frame is also at full resolution.
         corners = np.repeat(
-            np.expand_dims(np.asarray(markers)[:, ::-1] / 3.0, axis=1), 2, axis=1
+            np.expand_dims(np.asarray(markers)[:, ::-1], axis=1), 2, axis=1
         )
-        
+
         corners[:, 0] -= self.corner_subimage_half_size
         corners[:, 1] += self.corner_subimage_half_size
+
+        self.default_coords_subimages_corners = corners.astype(int)
+
+
+
+        # corners = np.repeat(
+        #     np.expand_dims(np.asarray(markers)[:, ::-1] / 3.0, axis=1), 2, axis=1
+        # )
         
-        # NOTE: trying the scaled down version
-        #corners[:, 0] = corners[:, 0] / 3
-        #corners[:, 1] = corners[:, 1] / 3 # NOTE: when i scale them down they at least compile...
+        # corners[:, 0] -= self.corner_subimage_half_size
+        # corners[:, 1] += self.corner_subimage_half_size
         
-        self.default_coords_subimages_corners = corners.astype(int) # NOTE: outer corners, original resolution?  # TODO: ASK THOMAS! 
+        # self.default_coords_subimages_corners = corners.astype(int)
         
         self.default_coords_subimage_ball = (
             self.default_coords_subimages_corners[3, 0],
             self.default_coords_subimages_corners[1, 1],
         )
 
-    # @profile(sort_by='cumulative', lines_to_print=10, strip_dirs=True)
     def process_frame(self, frame):
-        """
-        Process frame to get raw image coordinates of the four corners and the ball.
-
-        Args :
-            frame: np.ndarray, dim: (400, 640)
-        Returns :
-            corners: np.ndarray, dim: (4,2)
-                     the raw image coordinates of the four corners dots in (x,y) = (line, column) convention.
-            ball: np.ndarray, dim: (2,)
-                     the raw image coordinates of the ball in (x,y) = (line, column) convention.
-        """
-        # NOTE: these print statements are useful to debug corner and ball detection
-        # print("delect corners")
         corners = self.detect_corners(frame)
-        # print("corners: ", corners)
-        # print("detect ball")
         ball = self.detect_ball(frame, show_rectangle=True)
-        # print("ball: ", ball)
-        return corners, ball  # both in (x,y) conventions
+        return corners, ball
 
     def get_cropped(self, im: np.ndarray, pos: np.ndarray, h_p: float, w_p: float):
         """
         Return cropped image and its top-left and
                 down-right corners coordinates in the given image.
-        Args :
-            im: np.ndarray
-                image
-            pos: np.ndarray
-                 position of the center of the subimage
-            h_p: float
-                 height of the subimage
-            w_p: float
-                 width of the subimage
-        Returns :
-            im_cropped: np.ndarray
-            ul: np.ndarray, dim: (2,)
-                top-left corner coordinates in the given image.
-            dr: np.ndarray, dim: (2,)
-                down-right corner coordinates in the given image.
         """
         h, w = im.shape[:2]
-        # NOTE: useful for debugging the corner detection:
-        # print(" \n\ngetting the cropped image: ")
-        # print("im shape: ", im.shape)
-        # print("pos: ", pos)
-        # print("h_p: ", h_p)
-        # print("w_p: ", w_p)
-
-        ul_x = min(h - 1, max(0, int(pos[0] - h_p / 2)))
-        ul_y = min(w - 1, max(0, int(pos[1] - w_p / 2)))
-        dr_x = min(h - 1, max(0, int(pos[0] + h_p / 2)))
-        dr_y = min(w - 1, max(0, int(pos[1] + w_p / 2)))
-        im_cropped = im[ul_x:dr_x, ul_y:dr_y]
-        ul = np.array([ul_x, ul_y])
-        dr = np.array([dr_x, dr_y])
+      
         
-        # print("ul: ", ul)
-        # print("dr: ", dr)
-        # print("im_cropped shape: ", im_cropped.shape)
+        # Assume input `pos` is in (row, column) format based on comments
+        center_row, center_col = pos[0], pos[1]
+        
+        # Calculate half-width and half-height
+        half_h = h_p / 2
+        half_w = w_p / 2
+        
+        # Calculate row and column boundaries, ensuring they are within the image frame
+        row_start = min(h - 1, max(0, int(center_row - half_h)))
+        row_end   = min(h - 1, max(0, int(center_row + half_h)))
+        col_start = min(w - 1, max(0, int(center_col - half_w)))
+        col_end   = min(w - 1, max(0, int(center_col + half_w)))
+
+        # Slice the image using the correct [rows, columns] convention
+        im_cropped = im[row_start:row_end, col_start:col_end]
+        
+        # Define the upper-left and lower-right corner coordinates
+        ul = np.array([row_start, col_start])
+        dr = np.array([row_end, col_end])
+        
         return im_cropped, ul, dr
 
     def predictive_cropping_corners(self, im: np.ndarray):
-        """
-        Performs predictive cropping for detecting corners based on previous detections.
-
-        Parameters:
-        -----------
-        im : np.ndarray
-            Input image.
-
-        Returns:
-        --------
-        tuple[list[np.ndarray], list[tuple[np.ndarray, np.ndarray]]]
-            - `subimgs`: List of cropped images for each corner.
-            - `subcoords`: List of tuples containing upper-left and lower-right coordinates.
-        """
-        print("using predictive cropping corners")
         h, w = im.shape[:2]
         h_p, w_p = (
             Detector.DEFAULT_SIZE_CROP_CORNERS,
@@ -199,6 +125,7 @@ class Detector:
         subimgs = []
         subcoords = []
         for i in range(4):
+            # self.corners[i, :] is already (row, col)
             subimg, ul, dr = self.get_cropped(im, self.corners[i, :], h_p, w_p)
             subimgs.append(subimg)
             subcoords.append((ul, dr))
@@ -477,15 +404,15 @@ class DetectorFixedPts(Detector):
     hsv_corners : tuple
         Custom HSV parameters for fixed-point detection.
     """
-    def __init__(self, markers, show_subimages: bool = False):
-        hsv_corners = (
-            (43, 140),  # (minHue, maxHue)
-            (125, 255),  # (minSat, maxSat)
-            (40, 255),  # (minVal, maxVal)
-        )
+    def __init__(self, markers, show_subimages: bool = True):
+        # hsv_corners = (
+        #     (43, 140),  # (minHue, maxHue)
+        #     (125, 255),  # (minSat, maxSat)
+        #     (40, 255),  # (minVal, maxVal)
+        # )
         super().__init__(
             markers,
-            hsv_params_corners=hsv_corners,
+           # 
             corner_subimage_half_size=12,
             show_subimages=show_subimages,
         )

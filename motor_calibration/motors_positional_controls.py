@@ -26,10 +26,10 @@ PROTOCOL_VERSION = 2.0
 
 # Motor IDs (set these to your motor IDs) # should be set to 1 and 2 in the dynamixel app.
 DXL0_ID = 1
-DXL1_ID = 2
+DXL1_ID = 3
 
 # Communication settings (example for macOS; change as needed)
-DEVICENAME = '/dev/tty.usbserial-FT79212K'  # Replace with your device name
+DEVICENAME = '/dev/tty.usbserial-FTA7NMFT'  # Replace with your device name
 BAUDRATE = 1000000  # 1M bps
 
 # Torque control flags
@@ -369,7 +369,7 @@ def run_gentle_rocking_test(cycles=5, delay=1.5, steps=15):
 # Allow the module to be run as a standalone script for testing.
 if __name__ == "__main__":
     # Run the gentle rocking motion test
-    run_gentle_rocking_test()
+    # run_gentle_rocking_test()
     # Uncomment any of these lines to run other tests
-    # run_position_control_test()
+    run_position_control_test()
     # run_current_control_test()
