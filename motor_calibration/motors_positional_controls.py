@@ -371,5 +371,5 @@ if __name__ == "__main__":
     # Run the gentle rocking motion test
     # run_gentle_rocking_test()
     # Uncomment any of these lines to run other tests
-    run_position_control_test()
-    # run_current_control_test()
+    # run_position_control_test()
+    run_current_control_test()

@@ -15,10 +15,10 @@ class Detector:
     (Documentation remains the same)
     """
 
-    DEFAULT_HSV_CORNERS = ((90, 158), (60, 255), (142, 255))
+    DEFAULT_HSV_CORNERS = ((94, 137), (36, 255), (128, 255)) #((85, 137), (77, 255), (109, 255))
     DEFAULT_Q_CORNERS = 5
     DEFAULT_TH_CORNERS = 0.002
-    DEFAULT_HSV_BALL = ((50, 124), (165, 255), (87, 255))
+    DEFAULT_HSV_BALL = ((40, 135), (40, 255), (42, 255))
     DEFAULT_Q_BALL = 6
     DEFAULT_TH_BALL = 10 ** (-4)
     DEFAULT_SIZE_CROP_CORNERS = 95 / 3
