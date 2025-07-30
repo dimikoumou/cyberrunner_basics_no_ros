@@ -11,6 +11,8 @@ from anim_3d import Anim3d
 from divers import init_win_subimages
 
 
+
+
 class Measurements:
     def __init__(
         self, markers, do_anim_3d=True, viewpoint="top", show_subimages_detector=False
@@ -249,3 +251,4 @@ class Measurements:
         )[:-1]
         self.anim_3d_side.maze_corners__W = self.plate_pose.estimate_maze_corners__W()
         self.anim_3d_side.update_anim()
+

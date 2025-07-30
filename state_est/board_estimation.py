@@ -23,7 +23,7 @@ class EstimationPipeline:
         # share = get_package_share_directory("cyberrunner_state_estimation")
         markers = np.loadtxt("markers.csv", delimiter=",", skiprows=1, usecols=[2, 3])
         
-        print(f"loaded markers [at the start of the Estimation pipleine]: {markers}") 
+        # No scaling needed - markers are now at full resolution
         self.measurements = Measurements(
             markers=markers,
             do_anim_3d=do_anim_3d,

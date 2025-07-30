@@ -8,7 +8,7 @@ from collections import deque
 # (A) CameraCaptureThread
 # ---------------------------------------------------------------------
 class CameraCaptureThread(threading.Thread):
-    def __init__(self, camera_index=0, queue_size=2):
+    def __init__(self, camera_index=1, queue_size=2):
         super().__init__()
         self.camera_index = camera_index
         self.cap = None
@@ -57,7 +57,7 @@ class CameraCaptureThread(threading.Thread):
 # (B) Main Function: Capture and Save an Image
 # ---------------------------------------------------------------------
 def main():
-    cam_thread = CameraCaptureThread(camera_index=0)
+    cam_thread = CameraCaptureThread(camera_index=1)
     cam_thread.start()
 
     # Wait up to 5 seconds for a frame to be captured

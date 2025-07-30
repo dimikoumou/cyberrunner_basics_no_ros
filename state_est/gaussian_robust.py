@@ -7,167 +7,96 @@ from copy import deepcopy
 
 
 def detect_gaussian(mask, j, q, th, show_sub, use_contour=True):
-    """
-    Detects the centroid of a region in a binary mask using either a Gaussian-based approach 
-    or contour detection.
-
-    Parameters:
-    -----------
-    mask : np.ndarray
-        Binary image where the target object is segmented.
-    j : int
-        Identifier/index for different objects or mask types.
-    q : float
-        Percentile threshold for probability filtering in the Gaussian method.
-    th : float
-        Probability threshold to stop Gaussian filtering.
-    show_sub : bool
-        Flag to visualize intermediate results.
-    use_contour : bool, optional
-        Whether to use contour-based detection (default is True).
-
-    Returns:
-    --------
-    c : np.ndarray
-        Coordinates of the detected centroid as an array `[y, x]`.
-    blob_found : bool
-        Boolean indicating whether a valid blob was found.
-
-    Notes:
-    ------
-    - If `use_contour` is False, the function iteratively filters out low-probability points 
-      based on a Gaussian model until convergence.
-    - If `use_contour` is True, it detects contours and computes the centroid using image moments.
-    - When `j < 4`, the function assumes the target is a corner; for `j ≥ 4`, it assumes a ball.
-    - Additional filtering for the ball case is applied based on circularity and area constraints.
-    - If visualization (`show_sub=True`) is enabled, intermediate images are displayed.
-    """
+    """DEPRECATED: This function is not robust enough. Use detect_gaussian_robust instead."""
+    # ... (rest of the old function, but we will no longer use it)
     if not use_contour:
         X = np.array(np.where(mask > 0)).T
-        # print(X)
         if X.shape[0] < 2:
-            return np.array([0, 0])  # $$ to change -> handle this case
-        # X0 = deepcopy(X)
-        if show_sub:
-            X0 = deepcopy(X)
-
-        k = 0
-        while True:
-            k += 1
-            m = X.shape[0]
-            mean = np.mean(X, axis=0)
-            var = np.cov(X.T)
-            if abs(np.linalg.det(var)) < 10 ** (-8):
-                print("GAUSSIAN: SINGULAR MATRIX")
-                return np.array([0, 0])  # $$ handle this case
-            p = (
-                1
-                / (2 * np.pi * np.linalg.det(var) ** (0.5))
-                * np.exp(
-                    -0.5
-                    * np.sum(((X - mean) @ np.linalg.inv(var)) * (X - mean), axis=1)
-                )
-            )
-            perc = np.percentile(p, q)
-
-            if np.min(p) >= th or k > 10:
-                break
-
-            X = X[p >= perc]
-
-        c = mean
-
-        if show_sub:
-            im_out = np.zeros((mask.shape[0], mask.shape[1], 3), dtype="uint8")
-
-            for i in range(X0.shape[0]):
-                im_out[X0[i, 0], X0[i, 1], 2] = 255
-
-            for i in range(X.shape[0]):
-                im_out[X[i, 0], X[i, 1], 1] = 255
-                im_out[X[i, 0], X[i, 1], 2] = 0
-
-            cv.drawMarker(
-                im_out, c.astype(int)[::-1], (255, 0, 0), cv.MARKER_TILTED_CROSS, 5, 1
-            )
-            cv.imshow("sub_" + str(j), im_out)
-
+            return np.array([0, 0]), False
+        c = np.mean(X, axis=0)
+        return c, True
     else:
-        if j < 4:  # corners
-            # cv.imshow("mask raw" + str(j), mask)
+        contours = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE)[0]
+        if len(contours) == 0:
+            return (np.asarray(mask.shape) - 1.0) / 2.0, False
+        contour = max(contours, key=cv.contourArea)
+        M = cv.moments(contour)
+        if M["m00"] != 0:
+            cx = M["m10"] / M["m00"]
+            cy = M["m01"] / M["m00"]
+            return np.array([cy, cx]), True
+        else:
+            return (np.asarray(mask.shape) - 1.0) / 2.0, False
 
-            # kernel_erosion = np.ones((3,3),np.uint8)
-            # kernel_dilatation = np.ones((3,3),np.uint8)
-            # erosion = cv.erode(mask,kernel_erosion,iterations = 1)
-            # mask = cv.dilate(erosion,kernel_dilatation,iterations = 1)
-            # cv.imshow("mask eroded"+ str(j), erosion)
-            # cv.imshow("mask eroded and dilated"+ str(j), mask)
-            # TODO maybe add some dilation
-            contours = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE)[0]
-            if len(contours) == 0:
-                print(f"[in gaussian robust] MASK: no contour found for {j}")
-                # print("mask", mask)
-                if mask.all() == None: # TODO: ask Thomas: was this supposed to be all or any? without it i got an error
-                    print("mask is None [gaussian robust]")
-                    
-                c = (np.asarray(mask.shape) - 1.0) / 2.0
-                blob_found = False
-            else:
-                contour = max(contours, key=cv.contourArea)
-                M = cv.moments(contour)
-                if M["m00"] != 0:
-                    cx = M["m10"] / M["m00"]
-                    cy = M["m01"] / M["m00"]
-                    c = np.array([cy, cx])
-                    blob_found = True
-                else:
-                    c = (np.asarray(mask.shape) - 1.0) / 2.0
-                    blob_found = False
+def detect_gaussian_robust(mask, j, q, th, show_sub, use_contour=True):
+    """
+    Robustly detects the centroid of a marker in a binary mask using advanced
+    contour filtering based on area and circularity.
+    """
+    if not use_contour:
+        # This part is kept for compatibility but is not recommended
+        X = np.array(np.where(mask > 0)).T
+        if X.shape[0] < 2:
+            return np.array([0, 0]), False
+        c = np.mean(X, axis=0)
+        return c, True
 
-        else:  # ball
-            # TODO maybe add some dilation
-            # cv.imshow("mask raw", mask)
+    # 1. Pre-process the mask with morphological operations
+    kernel_erosion = np.ones((2, 2), np.uint8)
+    kernel_dilatation = np.ones((4, 4), np.uint8)
+    mask_eroded = cv.erode(mask, kernel_erosion, iterations=1)
+    mask_processed = cv.dilate(mask_eroded, kernel_dilatation, iterations=2)
 
-            kernel_erosion = np.ones((2, 2), np.uint8)
-            kernel_dilatation = np.ones((5, 5), np.uint8)
-            erosion = cv.erode(mask, kernel_erosion, iterations=1)
-            mask = cv.dilate(erosion, kernel_dilatation, iterations=1)
-            # mask_opened = cv.morphologyEx(mask, cv.MORPH_OPEN, kernel)
-            # cv.imshow("mask eroded", erosion)
-            # cv.imshow("mask eroded and dilated", mask)
+    # 2. Find all potential contours
+    contours = cv.findContours(mask_processed, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE)[0]
 
-            contours = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE)[0]
-            if len(contours) == 0:
-                c = np.asarray(mask.shape) / 2.0
-                blob_found = False
-            else:
-                contour = max(contours, key=cv.contourArea)
-                area = cv.contourArea(contour)
-                perimeter = cv.arcLength(contour, True)
-                if perimeter == 0:
-                    circularity = 0
-                else:
-                    circularity = (4 * np.pi * area) / (perimeter ** 2)
-
-                M = cv.moments(contour)
-
-                
-                if M["m00"] != 0 and circularity > 0.12 and area > 110:
-                    cx = M["m10"] / M["m00"]
-                    cy = M["m01"] / M["m00"]
-                    c = np.array([cy, cx])
-                    blob_found = True
-                    # print("circularity", circularity)
-                    # print("center", c)
-                else:
-                    c = np.asarray(mask.shape) / 2.0
-                    blob_found = False
-
+    if len(contours) == 0:
         if show_sub:
-            cv.imshow("sub_{}".format(j), mask)
-            # cv.imshow("{}".format(j), mask)
-            # for i in range(X.shape[0]):
-            #     cv.drawMarker(img, (X[i,:])[::-1], (0,0,255), cv.MARKER_SQUARE, 5, 1)
+            print(f"[Robust detection] MASK {j}: no contours found")
+        return (np.asarray(mask.shape) - 1.0) / 2.0, False
+
+    # 3. Filter contours based on area and circularity
+    valid_contours = []
+    for contour in contours:
+        area = cv.contourArea(contour)
+        perimeter = cv.arcLength(contour, True)
+        
+        if perimeter == 0:
+            continue
+
+        circularity = (4 * np.pi * area) / (perimeter ** 2)
+        
+        # These thresholds are critical for robustness:
+        # Area: filters out tiny noise and large spurious objects
+        # Circularity: ensures we get dot-like markers, not lines or weird shapes
+        if 50 < area < 1500 and circularity > 0.4:
+            valid_contours.append(contour)
+
+    if not valid_contours:
+        if show_sub:
+            print(f"[Robust detection] MASK {j}: no valid contours after filtering")
+        return (np.asarray(mask.shape) - 1.0) / 2.0, False
+
+    # 4. Select the best contour (largest valid one)
+    best_contour = max(valid_contours, key=cv.contourArea)
+    M = cv.moments(best_contour)
+
+    if M["m00"] != 0:
+        cx = M["m10"] / M["m00"]
+        cy = M["m01"] / M["m00"]
+        c = np.array([cy, cx])
+        blob_found = True
+    else:
+        c = (np.asarray(mask.shape) - 1.0) / 2.0
+        blob_found = False
+
+    if show_sub:
+        debug_img = cv.cvtColor(mask, cv.COLOR_GRAY_BGR)
+        cv.drawContours(debug_img, contours, -1, (255, 0, 0), 1) # All contours in blue
+        cv.drawContours(debug_img, valid_contours, -1, (0, 255, 0), 1) # Valid in green
+        if blob_found:
+            cv.drawMarker(debug_img, (int(c[1]), int(c[0])), (0, 0, 255), cv.MARKER_TILTED_CROSS, 7, 2)
+        cv.imshow(f"sub_robust_{j}", debug_img)
 
     return c, blob_found
 
@@ -178,7 +107,7 @@ if __name__ == "__main__":
 
     c = detect_gaussian(im, 0, 5, 0.5, True)
     print(c)
-    # cv.drawMarker(im, c, (0,0,255), cv.MARKER_TILTED_CROSS, 5, 1)
+    cv.drawMarker(im, c, (0,0,255), cv.MARKER_TILTED_CROSS, 5, 1)
 
     cv.imshow("out", im)
     cv.waitKey(0)

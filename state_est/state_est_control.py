@@ -168,11 +168,8 @@ if __name__ == "__main__":
     pause = False
     tframe = 0
 
-    # load the markers from markers.csv
-    Markers = np.loadtxt("markers.csv", delimiter=",", skiprows=1, usecols=[2, 3])
-    
-    # scale down the markers by 1/3
-    markers = Markers / 3
+    # Markers are already at proper resolution from marker_calibration.py
+    markers = np.loadtxt("markers.csv", delimiter=",", skiprows=1, usecols=[2, 3])
 
     portHandler, packetHandler = init_dynamixel()
     if not portHandler or not packetHandler:

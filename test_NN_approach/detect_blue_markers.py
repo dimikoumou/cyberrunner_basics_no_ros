@@ -23,7 +23,8 @@ def detect_blue_markers(frame):
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
     
     # Find contours
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # Store all contours for filtering
+    contours, _ = cv2.findContours(mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
     
     # Filter contours based on area to get the 8 largest blue regions
     min_area = 20  # Adjust as needed

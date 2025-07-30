@@ -1,6 +1,6 @@
 import cv2
 from board_estimation import EstimationPipeline
-frame = cv2.imread("board.png")
+
 # Create the estimation pipeline first
 pipeline = EstimationPipeline(
     fps=30,
@@ -10,7 +10,7 @@ pipeline = EstimationPipeline(
 )
 
 # # Start camera feed
-cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture(1)
 
 while True:
     ret, frame = cap.read()

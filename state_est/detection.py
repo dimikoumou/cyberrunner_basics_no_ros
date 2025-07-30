@@ -2,7 +2,7 @@ import numpy as np
 import cv2
 
 # It's good practice to keep these helper modules imported
-from gaussian_robust import detect_gaussian
+from gaussian_robust import detect_gaussian, detect_gaussian_robust
 from masking import mask_hsv
 
 colors = [(255, 0, 255), (0, 255, 0), (0, 0, 255), (0, 255, 255)]
@@ -15,10 +15,10 @@ class Detector:
     (Documentation remains the same)
     """
 
-    DEFAULT_HSV_CORNERS = ((94, 137), (36, 255), (128, 255)) #((85, 137), (77, 255), (109, 255))
+    DEFAULT_HSV_CORNERS = ((90, 120), (220, 255), (140, 255))  # Optimized based on debug analysis: H=104±14, S=220+, V=140+
     DEFAULT_Q_CORNERS = 5
     DEFAULT_TH_CORNERS = 0.002
-    DEFAULT_HSV_BALL = ((40, 135), (40, 255), (42, 255))
+    DEFAULT_HSV_BALL = ((54, 100), (79, 255), (10, 255))
     DEFAULT_Q_BALL = 6
     DEFAULT_TH_BALL = 10 ** (-4)
     DEFAULT_SIZE_CROP_CORNERS = 95 / 3
@@ -36,7 +36,10 @@ class Detector:
         th_ball: float = DEFAULT_TH_BALL,
         ball_init_pos: np.ndarray = DEFAULT_INIT_BALL_POS,
         corner_subimage_half_size=17,
-        show_subimages=False,
+        min_area=50,
+       show_subimages=False,
+        max_area=1000,
+        min_circularity=0.6,
         
     ):
         self.hsv_params_corners = hsv_params_corners
@@ -44,7 +47,9 @@ class Detector:
         self.th_corners = th_corners
         self.hsv_params_ball = hsv_params_ball
         self.q_ball = q_ball
-        self.th_ball = th_ball
+        self.min_area = min_area
+        self.max_area = max_area
+        self.min_circularity = min_circularity
         self.ball_pos = None
         self.corners = None
         self.show_subimages = show_subimages
@@ -251,30 +256,97 @@ class Detector:
 
     def detect_corner(self, sub_im: np.ndarray, i: int, coords_ul_sub_im: np.ndarray):
         """
-        Detects a single corner in a cropped subimage.
-
-        Parameters:
-        -----------
-        sub_im : np.ndarray
-            Cropped subimage containing a corner.
-        i : int
-            Index of the corner.
-        coords_ul_sub_im : np.ndarray
-            Upper-left coordinates of the subimage in the original frame.
-
-        Returns:
-        --------
-        tuple[np.ndarray, bool]
-            - `c`: Detected corner position.
-            - `found`: Boolean indicating if the corner was found.
+        Detects a single corner in a cropped subimage using robust detection.
         """
-        # print("detecing corner number: ", i, "using Detector (not fixed pts) class") 
+        return self.detect_corner_with_filtering(sub_im, i, coords_ul_sub_im)
+    
+    def detect_corner_with_filtering(self, sub_im: np.ndarray, i: int, coords_ul_sub_im: np.ndarray):
+        """
+        Detects a single corner in a subimage with advanced contour filtering.
+        If a best contour exists, compute its centroid with image moments (M = cv2.moments). 
+        Return (int(M["m10"]/M["m00"]), int(M["m01"]/M["m00"])). Otherwise, return None.
+        """
+        # HSV masking and contour detection
         sub_masked, mask = mask_hsv(sub_im, self.hsv_params_corners)
-        c_local, found = detect_gaussian(
-            mask, i, self.q_corners, self.th_corners, show_sub=self.show_subimages
-        )
-        c = (coords_ul_sub_im + c_local).astype("float32")
-        return c, found
+        mask = cv2.GaussianBlur(mask, (5, 5), 0)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        if not contours:
+            return None, False
+
+        # Filter contours by area and circularity
+        valid_contours = []
+        for c in contours:
+            area = cv2.contourArea(c)
+            if area < self.min_area or area > self.max_area:
+                continue
+
+            perimeter = cv2.arcLength(c, True)
+            if perimeter == 0:
+                continue
+
+            circularity = 4 * np.pi * area / (perimeter**2)
+            if circularity < self.min_circularity:
+                continue
+
+            valid_contours.append(c)
+
+        if not valid_contours:
+            return None, False
+
+        # Select the best contour (e.g., largest area)
+        best_contour = max(valid_contours, key=cv2.contourArea)
+        M = cv2.moments(best_contour)
+        if M["m00"] == 0:
+            return None, False
+
+        cx = int(M["m10"] / M["m00"])
+        cy = int(M["m01"] / M["m00"])
+
+        # Return center coordinates and success status
+        return (coords_ul_sub_im + np.array([cy, cx])).astype("float32"), True
+
+    def detect_corner_robust(self, sub_im: np.ndarray, i: int, coords_ul_sub_im: np.ndarray):
+        """
+        Robustly detects a single corner by trying multiple HSV ranges and using
+        advanced contour filtering.
+        """
+        # Multiple HSV parameter sets to try
+        hsv_ranges = [
+            self.hsv_params_corners,  # Primary range
+            ((80, 130), (200, 255), (120, 255)),  # Slightly wider range
+            ((70, 140), (180, 255), (100, 255)),  # Even wider range
+            ((60, 150), (160, 255), (80, 255)),   # Very wide range
+        ]
+        
+        for attempt, hsv_params in enumerate(hsv_ranges):
+            try:
+                # Apply HSV masking
+                sub_masked, mask = mask_hsv(sub_im, hsv_params)
+                
+                # Add Gaussian blur to smooth noise before contour extraction
+                mask = cv2.GaussianBlur(mask, (5, 5), 0)
+
+                # Use robust detection
+                c_local, found = detect_gaussian_robust(
+                    mask, i, self.q_corners, self.th_corners, show_sub=self.show_subimages
+                )
+                
+                if found:
+                    c = (coords_ul_sub_im + c_local).astype("float32")
+                    if attempt > 0:
+                        print(f"Corner {i} found with HSV range {attempt + 1}")
+                    return c, True
+                    
+            except Exception as e:
+                print(f"Error in corner detection attempt {attempt + 1}: {e}")
+                continue
+        
+        # If all attempts failed, return center position
+        print(f"Corner {i} detection failed with all HSV ranges")
+        center_offset = np.array([sub_im.shape[0] // 2, sub_im.shape[1] // 2])
+        c = (coords_ul_sub_im + center_offset).astype("float32")
+        return c, False
 
     def detect_ball(
         self,
@@ -345,7 +417,10 @@ class Detector:
                 ul,
             )
         sub_masked, mask = mask_hsv(cropped_ball_im, self.hsv_params_ball)
-        # print("ball")
+
+        # Add Gaussian blur to smooth noise before contour extraction
+        mask = cv2.GaussianBlur(mask, (5, 5), 0)
+
         c_local, self.is_ball_found = detect_gaussian(
             mask, 4, self.q_ball, self.th_ball, show_sub=self.show_subimages
         )
@@ -442,6 +517,10 @@ class DetectorFixedPts(Detector):
         # print("sub_im shape: ", sub_im.shape)
         # # print("hsv_params: ", self.hsv_params_corners)
         sub_masked, mask = mask_hsv(sub_im, self.hsv_params_corners)
+
+        # Add Gaussian blur to smooth noise before contour extraction
+        mask = cv2.GaussianBlur(mask, (5, 5), 0)
+        
         c_local, blob_found = detect_gaussian(
             mask, i, self.q_corners, self.th_corners, show_sub=self.show_subimages
         )

@@ -48,19 +48,29 @@ This script will:
 - Capture a frame
 - Save it as `board.png`
 
-### 3. Board Detection
+### 3. Marker Calibration
 
-Detect the corner markers on the ball balancing board:
+Calibrate the corner markers on the ball balancing board for the current camera resolution:
+
+-> python marker_calibration.py
+
+This script will:
+- Capture a live frame from your camera at full resolution (1920x1080)
+- Guide you through clicking on the 8 corner points (4 outer and 4 inner corners)
+- Save the coordinates to `markers.csv` with proper resolution handling
+- Include key press debouncing for better user experience
+
+Alternatively, you can use the simplified interface:
 
 -> python board_detection.py
 
+This will automatically launch the marker calibration tool.
 
-This script will:
-- Load the `board.png` image
-- Guide you to click on the 8 corner points (4 outer and 4 inner corners)
-- Save the coordinates to `board_corners.csv` and `markers.csv`
-
-Follow the on-screen instructions to click on each corner in the specified order.
+Follow the on-screen instructions:
+- Click on each corner in the specified order
+- Press 'r' to reset if you make a mistake
+- Press 's' to save once all 8 corners are selected
+- Press 'q' to quit
 
 ### 4. Running State Estimation
 

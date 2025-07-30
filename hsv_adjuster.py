@@ -16,7 +16,7 @@ cv2.createTrackbar('V_min', 'Trackbars', 0, 255, nothing)
 cv2.createTrackbar('V_max', 'Trackbars', 255, 255, nothing)
 
 # Start camera feed
-cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture(1)  # Adjust the index if needed
 
 print("\nAdjust the sliders to isolate the corner color.")
 print("Press 'q' to quit and print the final HSV values.")

@@ -8,77 +8,109 @@ import pygame
 import os
 from datetime import datetime
 import json
-
-def save_the_cal_in_csv(calib_engine):
-    """saves the calibration in a csv file. 
-    the csv file will have the following structure:
-    #polynomial coefficients for the DIRECT mapping function (ocam_model.ss in MATLAB). These are used by cam2world
-
-    [list the coefficients here]
-
-    #polynomial coefficients for the inverse mapping function (ocam_model.invpol in MATLAB). These are used by world2cam
-
-    [list the coefficients here]
-
-    #center: "row" and "column", starting from 0 (C convention)
-
-    [xc, yc]
-
-    #affine parameters "c", "d", "e"
-
-    [c, d, e]
-
-    #image size: "height" and "width"
-
-    [height, width]
+# from ocamcalib import CameraCalibrator
 
 
-    Args:
-        calib_engine: calibration engine object from pyOCamCalib
+# def save_the_cal_in_csv(calib_engine):
+#     """saves the calibration in a csv file. 
+#     the csv file will have the following structure:
+#     #polynomial coefficients for the DIRECT mapping function (ocam_model.ss in MATLAB). These are used by cam2world
+
+#     [list the coefficients here]
+
+#     #polynomial coefficients for the inverse mapping function (ocam_model.invpol in MATLAB). These are used by world2cam
+
+#     [list the coefficients here]
+
+#     #center: "row" and "column", starting from 0 (C convention)
+
+#     [xc, yc]
+
+#     #affine parameters "c", "d", "e"
+
+#     [c, d, e]
+
+#     #image size: "height" and "width"
+
+#     [height, width]
+
+
+#     Args:
+#         calib_engine: calibration engine object from pyOCamCalib
+#     """
+    
+#     now = datetime.now()
+#     dt_string = now.strftime("%d%m%Y_%H%M%S")
+#     outputs = {"date": dt_string,
+#                    "camera_name": calib_engine.cam_name,
+#                    "valid": calib_engine.valid_pattern,
+#                    "taylor_coefficient": calib_engine.taylor_coefficient.tolist(),
+#                    "distortion_center": calib_engine.distortion_center,
+#                    "stretch_matrix": calib_engine.stretch_matrix.tolist(),
+#                    "inverse_poly": calib_engine.inverse_poly.tolist(),
+#                    "extrinsics_t": [e.tolist() for e in calib_engine.extrinsics_t],
+#                    "img_path": calib_engine.images_path,
+#                    "rms_overall": calib_engine.rms_overall,
+#                    "rms_mean_list": calib_engine.rms_mean_list,
+#                    "rms_std_list": calib_engine.rms_std_list
+#                    }
+#     # Save the this in a jscon file.
+#     with open(f'calibration_results/output.json', 'w') as f:
+#             json.dump(outputs, f, indent=4)
+    
+#     # Save the calibration data in a CSV file
+#     with open('calibration_results/calibration_data.csv', 'w') as f:
+#         f.write("#polynomial coefficients for the DIRECT mapping function (ocam_model.ss in MATLAB). These are used by cam2world\n")
+#         f.write(" ".join(map(str, calib_engine.taylor_coefficient)) + "\n\n")
+
+#         # Write the polynomial coefficients for the inverse mapping function
+#         f.write("#polynomial coefficients for the inverse mapping function (ocam_model.invpol in MATLAB). These are used by world2cam\n")
+#         f.write(" ".join(map(str, calib_engine.inverse_poly)) + "\n\n")
+
+#         # Write the distortion center
+#         f.write("#center: row and column, starting from 0 (C convention)\n")
+#         f.write(" ".join(map(str, calib_engine.distortion_center)) + "\n\n")
+
+#         # Write the stretch matrix
+#         f.write("#affine parameters c, d, e\n")
+#         f.write(" ".join(map(str, calib_engine.stretch_matrix)) + "\n\n") # NOTE: here I need to make sure i am using them in correct order(whats e whats d)
+
+#         # Write the image size
+#         f.write("#image size: height and width\n")
+#         f.write(f"{img_height},{img_width}\n")
+        
+#     print("Calibration data saved in 'calibration_results/calibration_data.csv'")
+    
+
+def save_ocam_calibration_file(calib_engine, image_shape, filename='calibration_results/calibration_data.txt'):
     """
+    Saves the calibration in the specific .txt format required by OcamModel.
+    """
+    if not os.path.exists('calibration_results'):
+        os.makedirs('calibration_results')
     
-    now = datetime.now()
-    dt_string = now.strftime("%d%m%Y_%H%M%S")
-    outputs = {"date": dt_string,
-                   "camera_name": calib_engine.cam_name,
-                   "valid": calib_engine.valid_pattern,
-                   "taylor_coefficient": calib_engine.taylor_coefficient.tolist(),
-                   "distortion_center": calib_engine.distortion_center,
-                   "stretch_matrix": calib_engine.stretch_matrix.tolist(),
-                   "inverse_poly": calib_engine.inverse_poly.tolist(),
-                   "extrinsics_t": [e.tolist() for e in calib_engine.extrinsics_t],
-                   "img_path": calib_engine.images_path,
-                   "rms_overall": calib_engine.rms_overall,
-                   "rms_mean_list": calib_engine.rms_mean_list,
-                   "rms_std_list": calib_engine.rms_std_list
-                   }
-    # Save the this in a jscon file.
-    with open(f'calibration_results/output.json', 'w') as f:
-            json.dump(outputs, f, indent=4)
-    
-    # Save the calibration data in a CSV file
-    with open('calibration_results/calibration_data.csv', 'w') as f:
-        f.write("#polynomial coefficients for the DIRECT mapping function (ocam_model.ss in MATLAB). These are used by cam2world\n")
-        f.write(" ".join(map(str, calib_engine.taylor_coefficient)) + "\n\n")
+    height, width = image_shape
 
-        # Write the polynomial coefficients for the inverse mapping function
-        f.write("#polynomial coefficients for the inverse mapping function (ocam_model.invpol in MATLAB). These are used by world2cam\n")
-        f.write(" ".join(map(str, calib_engine.inverse_poly)) + "\n\n")
+    with open(filename, 'w') as f:
+        # OcamModel expects specific header lines
+        f.write("OCamCalib Result\n")
+        f.write("\n")
+        f.write("#polynomial coefficients for the DIRECT mapping function (ocam_model.ss in MATLAB)\n")
+        f.write(f"{len(calib_engine.taylor_coefficient)} " + " ".join(map(str, calib_engine.taylor_coefficient)) + "\n\n")
 
-        # Write the distortion center
+        f.write("#polynomial coefficients for the inverse mapping function (ocam_model.invpol in MATLAB)\n")
+        f.write(f"{len(calib_engine.inverse_poly)} " + " ".join(map(str, calib_engine.inverse_poly)) + "\n\n")
+
         f.write("#center: row and column, starting from 0 (C convention)\n")
         f.write(" ".join(map(str, calib_engine.distortion_center)) + "\n\n")
 
-        # Write the stretch matrix
         f.write("#affine parameters c, d, e\n")
-        f.write(" ".join(map(str, calib_engine.stretch_matrix)) + "\n\n") # NOTE: here I need to make sure i am using them in correct order(whats e whats d)
+        f.write(" ".join(map(str, calib_engine.stretch_matrix)) + "\n\n")
 
-        # Write the image size
         f.write("#image size: height and width\n")
-        f.write(f"{img_height},{img_width}\n")
+        f.write(f"{height} {width}\n")
         
-    print("Calibration data saved in 'calibration_results/calibration_data.csv'")
-    
+    print(f"OCam-compatible calibration data saved in '{filename}'")
 
 
 def play_gong_for_one_second(filename='sounds/bleep.wav'):
@@ -102,7 +134,7 @@ def play_gong_for_one_second(filename='sounds/bleep.wav'):
 
 def calibrate_camera():
     # Define the dimensions of checkerboard (number of inner corners matters )
-    CHECKERBOARD = (28, 17)
+    CHECKERBOARD = (10, 7)
     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
 
     # Creating vector to store vectors of 3D points for each checkerboard image
@@ -117,7 +149,7 @@ def calibrate_camera():
     objp *= 0.024
 
     # Capture images from camera
-    cap = cv2.VideoCapture(0)  # incdex 0 should point to the razer camera
+    cap = cv2.VideoCapture(1)  # incdex 0 should point to the razer camera
 
     if not cap.isOpened():
         print("Error: Could not open camera.")
@@ -236,49 +268,49 @@ def calibrate_camera():
         print("Calibration images saved in the folder 'calib_images'")
         
         # Now run the pyOCamCalib calibration
-        try:
-
-            from pyocamcalib.script.calibration_script import CalibrationEngine
-            
-            print("Starting fisheye calibration with pyOCamCalib...")
-            
-            # Create the calibration engine with our captured images
-            calib_dir = 'calib_images'  # Directory where we saved the calibration images
-            calib_engine = CalibrationEngine(
-                working_dir=calib_dir,
-                chessboard_size=CHECKERBOARD,  # Using the same checkerboard dimensions
-                camera_name="razer_camera",
-                square_size=0.024  # Same square size as defined earlier (in meters)
-            )
-            
-            # Detect corners in the images
-            calib_engine.detect_corners(check=False)
-            print("Corners detected in images.")
-            # Estimate the fisheye camera parameters
-            calib_engine.estimate_fisheye_parameters()
-            print("Fisheye parameters estimated.")
-            
-            # Find the inverse polynomial
-            calib_engine.find_poly_inv()
-            print("Inverse polynomial found.")
-            # Save the calibration in pyOCamCalib's native format (JSON).
-            # NOTE: cant do this because this function has been designed to work only when ran by calibration_scropt.py from within the lib. so we save it ouselves. 
-            #calib_engine.save_calibration()
-            #print("Calibration saved in pyOCamCalib format.")
-            print("Saving calibration data in CSV format...")
-            save_the_cal_in_csv(calib_engine)
-            
-            # Also save important parameters in CSV format
-            
-            
-            return mtx, dist, calib_engine
-        
-        except ImportError:
-            print("pyOCamCalib library not found. Only OpenCV calibration results are available.")
-            return mtx, dist
-        except Exception as e:
-            print(f"Error during pyOCamCalib calibration: {str(e)}")
-            return mtx, dist
+        # try:
+        # 
+        #     
+        #     #from ocamcalib import CameraCalibrator
+        #     
+        #     print("Starting fisheye calibration with pyOCamCalib...")
+        #     
+        #     # Create the calibration engine with our captured images
+        #     calib_dir = 'calib_images'  # Directory where we saved the calibration images
+        #     calib_engine = CameraCalibrator(
+        #         working_dir=calib_dir,
+        #         chessboard_size=CHECKERBOARD,  # Using the same checkerboard dimensions
+        #         camera_name="razer_camera",
+        #         square_size=0.024  # Same square size as defined earlier (in meters)
+        #     )
+        #     
+        #     # Detect corners in the images
+        #     calib_engine.detect_corners(check=False)
+        #     print("Corners detected in images.")
+        #     # Estimate the fisheye camera parameters
+        #     calib_engine.estimate_fisheye_parameters()
+        #     print("Fisheye parameters estimated.")
+        #     
+        #     # Find the inverse polynomial
+        #     calib_engine.find_poly_inv()
+        #     print("Inverse polynomial found.")
+        #     # Save the calibration in pyOCamCalib's native format (JSON).
+        #     # NOTE: cant do this because this function has been designed to work only when ran by calibration_scropt.py from within the lib. so we save it ouselves. 
+        #     #calib_engine.save_calibration()
+        #     #print("Calibration saved in pyOCamCalib format.")
+  # save_ocam_calibration_file(calib_engine, (img_height, img_width))
+       #     
+        #     # Also save important parameters in CSV format
+        #     
+        #     
+        #     return mtx, dist, calib_engine
+        # 
+        # except ImportError:
+        #     print("pyOCamCalib library not found. Only OpenCV calibration results are available.")
+        #     return mtx, dist
+        # except Exception as e:
+        #     print(f"Error during pyOCamCalib calibration: {str(e)}")
+        #     return mtx, dist
     else:
         print("Not enough images captured for calibration.")
         return None, None

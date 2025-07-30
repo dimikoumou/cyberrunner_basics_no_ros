@@ -1,9 +1,9 @@
 corner_type,position,x,y
-outer,lower left,285,514
-outer,lower right,855,531
-outer,upper right,860,216
-outer,upper left,289,220
-inner,lower left,321,566
-inner,lower right,814,588
-inner,upper right,819,157
-inner,upper left,328,167
+outer,lower left,469,831
+outer,lower right,1473,857
+outer,upper right,1485,295
+outer,upper left,481,267
+inner,lower left,536,910
+inner,lower right,1396,927
+inner,upper right,1419,203
+inner,upper left,545,181
