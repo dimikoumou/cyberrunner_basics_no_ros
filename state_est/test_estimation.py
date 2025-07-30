@@ -1,5 +1,8 @@
 import cv2
-from board_estimation import EstimationPipeline
+try:
+    from .board_estimation import EstimationPipeline
+except ImportError:
+    from board_estimation import EstimationPipeline
 
 # Create the estimation pipeline first
 pipeline = EstimationPipeline(

@@ -7,7 +7,10 @@ import numpy as np
 from matplotlib import animation
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import time
-from divers import move_figure
+try:
+    from .divers import move_figure
+except ImportError:
+    from divers import move_figure
 
 
 class Anim3d:

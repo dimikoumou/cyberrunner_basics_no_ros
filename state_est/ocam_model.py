@@ -34,13 +34,18 @@ class OcamModel:
             calib_txt = f.read()
         calib_txt = calib_txt.splitlines()
 
-        self.ss = np.fromstring(calib_txt[2], sep=" ")[1:]
-        self.inv_ss = np.fromstring(calib_txt[6], sep=" ")[1:]
-        self.xc, self.yc = np.fromstring(calib_txt[10], sep=" ")
-        self.c, self.d, self.e = np.fromstring(calib_txt[14], sep=" ")
+        self.ss = np.fromstring(calib_txt[3], sep=" ")[1:]
+        self.inv_ss = np.fromstring(calib_txt[7], sep=" ")[1:]
+        self.xc, self.yc = np.fromstring(calib_txt[9], sep=" ")
+        # The affine parameters are in a different format in the new file.
+        # I will parse them manually.
+        line_12 = calib_txt[12].replace("[", "").replace("]", "").split()
+        self.c = float(line_12[0])
+        self.d = float(line_12[1])
+        self.e = float(line_12[2])
         self.a = np.array([[self.c, self.d], [self.e, 1.0]])
         self.a_inv = np.linalg.inv(self.a)
-        self.height, self.width = np.fromstring(calib_txt[18], sep=" ")
+        self.height, self.width = np.fromstring(calib_txt[15], sep=" ")
 
         # Edge vectors where z = -1
         self.edges = np.empty((4, 3))

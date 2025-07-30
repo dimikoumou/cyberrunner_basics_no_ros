@@ -4,7 +4,10 @@ import os
 import cv2
 import numpy as np
 
-from ocam_model import OcamModel
+try:
+    from .ocam_model import OcamModel
+except ImportError:
+    from ocam_model import OcamModel
 
 colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (0, 255, 255)]
 c_name = ["blue", "green", "red", "yellow"]
@@ -60,8 +63,7 @@ class PlatePoseEstimator:
         self.print_details = print_details
 
         # share = get_package_share_directory("cyberrunner_state_estimation")
-        o = OcamModel(os.path.join(os.path.dirname(__file__), "calib_razer_data.txt"))
-        o.scale(3)  # From 1920 to 640 res # NOTE: this is critical for the correct estimation of the angles!!!! #TODO: should we automatically detect the scale?
+        o = OcamModel(os.path.join(os.path.dirname(__file__), "../calibration_results/calibration_data.txt"))
         self.o = o
         xc, yc = o.xc, o.yc
         self.f = 300

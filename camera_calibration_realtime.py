@@ -8,7 +8,7 @@ import pygame
 import os
 from datetime import datetime
 import json
-# from ocamcalib import CameraCalibrator
+from pyocamcalib.script.calibration_script import CalibrationEngine
 
 
 # def save_the_cal_in_csv(calib_engine):
@@ -268,49 +268,31 @@ def calibrate_camera():
         print("Calibration images saved in the folder 'calib_images'")
         
         # Now run the pyOCamCalib calibration
-        # try:
-        # 
-        #     
-        #     #from ocamcalib import CameraCalibrator
-        #     
-        #     print("Starting fisheye calibration with pyOCamCalib...")
-        #     
-        #     # Create the calibration engine with our captured images
-        #     calib_dir = 'calib_images'  # Directory where we saved the calibration images
-        #     calib_engine = CameraCalibrator(
-        #         working_dir=calib_dir,
-        #         chessboard_size=CHECKERBOARD,  # Using the same checkerboard dimensions
-        #         camera_name="razer_camera",
-        #         square_size=0.024  # Same square size as defined earlier (in meters)
-        #     )
-        #     
-        #     # Detect corners in the images
-        #     calib_engine.detect_corners(check=False)
-        #     print("Corners detected in images.")
-        #     # Estimate the fisheye camera parameters
-        #     calib_engine.estimate_fisheye_parameters()
-        #     print("Fisheye parameters estimated.")
-        #     
-        #     # Find the inverse polynomial
-        #     calib_engine.find_poly_inv()
-        #     print("Inverse polynomial found.")
-        #     # Save the calibration in pyOCamCalib's native format (JSON).
-        #     # NOTE: cant do this because this function has been designed to work only when ran by calibration_scropt.py from within the lib. so we save it ouselves. 
-        #     #calib_engine.save_calibration()
-        #     #print("Calibration saved in pyOCamCalib format.")
-  # save_ocam_calibration_file(calib_engine, (img_height, img_width))
-       #     
-        #     # Also save important parameters in CSV format
-        #     
-        #     
-        #     return mtx, dist, calib_engine
-        # 
-        # except ImportError:
-        #     print("pyOCamCalib library not found. Only OpenCV calibration results are available.")
-        #     return mtx, dist
-        # except Exception as e:
-        #     print(f"Error during pyOCamCalib calibration: {str(e)}")
-        #     return mtx, dist
+        try:
+            from pyocamcalib.script.calibration_script import CalibrationEngine
+            print("Starting fisheye calibration with pyOCamCalib...")
+            calib_dir = 'calib_images'
+            calib_engine = CalibrationEngine(
+                working_dir=calib_dir,
+                chessboard_size=CHECKERBOARD,
+                camera_name="razer_camera",
+                square_size=0.024
+            )
+            calib_engine.detect_corners(check=False)
+            print("Corners detected in images.")
+            calib_engine.estimate_fisheye_parameters()
+            print("Fisheye parameters estimated.")
+            calib_engine.find_poly_inv()
+            print("Inverse polynomial found.")
+            print("Saving calibration data in CSV format...")
+            save_ocam_calibration_file(calib_engine, (img_height, img_width))
+            return mtx, dist, calib_engine
+        except ImportError:
+            print("pyOCamCalib library not found. Only OpenCV calibration results are available.")
+            return mtx, dist
+        except Exception as e:
+            print(f"Error during pyOCamCalib calibration: {str(e)}")
+            return mtx, dist
     else:
         print("Not enough images captured for calibration.")
         return None, None

@@ -2,8 +2,12 @@ import numpy as np
 import time
 import cv2
 import os
-from measurements import Measurements
-from estimator import  FiniteDiff
+try:
+    from .measurements import Measurements
+    from .estimator import  FiniteDiff
+except ImportError:
+    from measurements import Measurements
+    from estimator import  FiniteDiff
 # from packages import get_package_share_directory
 
 
@@ -81,7 +85,7 @@ class EstimationPipeline:
             print(
                 f"ball: ({xb:6.3f}, {yb:>6.3f}) | (a, b): ({inputs[0]*180/np.pi:>5.2f}, {inputs[1]*180/np.pi:>5.2f}) [deg] | tmeas:{1000*tmeas:5.2f} [ms] | x_hat:{x_hat} | ab_est:({alpha_est:5.2f}, {beta_est:5.2f}) [deg]"
             )
-        if self.show_image:
+        if self.show_image and not np.isnan(xb):
             self.measurements.detector.draw_corners(frame)
             self.measurements.detector.draw_ball(frame)
             cv2.imshow("ori", frame)

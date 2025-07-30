@@ -5,10 +5,16 @@ import cv2
 import numpy as np
 
 
-from detection import Detector, DetectorFixedPts
-from plate_pose import PlatePoseEstimator
-from anim_3d import Anim3d
-from divers import init_win_subimages
+try:
+    from .detection import Detector, DetectorFixedPts
+    from .plate_pose import PlatePoseEstimator
+    from .anim_3d import Anim3d
+    from .divers import init_win_subimages
+except ImportError:
+    from detection import Detector, DetectorFixedPts
+    from plate_pose import PlatePoseEstimator
+    from anim_3d import Anim3d
+    from divers import init_win_subimages
 
 
 
