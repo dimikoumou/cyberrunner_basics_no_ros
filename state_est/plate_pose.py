@@ -75,7 +75,7 @@ class PlatePoseEstimator:
         self.img_points_corners_undist = None
         self.img_points_fixed_corners_undist = None
 
-    def estimate_anglesXY(self, corners_undist):  # (x,y)
+    def estimate_anglesXY(self, corners_undist): # (x,y)
         """
         Compute the angles (Euler XYZ) that describe the orientation of the maze frame {m} wrt to the world frame {w}.
 

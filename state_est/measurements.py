@@ -206,11 +206,11 @@ class Measurements:
         print("Saved mask as debug_board_mask.png")
 
         # delete after 
-        print("Showing mask window...")
-        cv2.imshow("Board Mask", self.mask)
-        cv2.waitKey(0)
-        cv2.destroyWindow("Board Mask")
-        print("Destroying mask window")
+        # print("Showing mask window...")
+        # cv2.imshow("Board Mask", self.mask)
+        # cv2.waitKey(0)
+        # cv2.destroyWindow("Board Mask")
+        # print("Destroying mask window")
     def ball_pos_backproject(self, ball_undist, K, T__C_M):
         """
         Compute the 3d position of the ball in the maze frame {m}.

@@ -79,7 +79,7 @@ class EstimationPipeline:
         if self.print_measurements:
             print(f"ball: ({xb:6.3f}, {yb:>6.3f}) | (a, b): ({inputs[0]*180/np.pi:>5.2f}, {inputs[1]*180/np.pi:>5.2f}) [deg] | tmeas:{1000*tmeas:5.2f} [ms] | x_hat:{x_hat} | ab_est:({alpha_est:5.2f}, {beta_est:5.2f}) [deg]")
         if self.show_image:
-            self.measurements.detector.draw_corners(frame)
+            self.measurements.detector.draw_corners(frame)\n            self.measurements.detector.draw_ball(frame)
             # if the ball is not detected (seen as nan), draw a circle at the center of the image
             if np.isnan(xb) or np.isnan(yb):
                 print("")

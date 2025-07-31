@@ -9,7 +9,7 @@ except ImportError:
     from gaussian_robust import detect_gaussian, detect_gaussian_robust
     from masking import mask_hsv
 
-colors = [(255, 0, 255), (0, 255, 0), (0, 0, 255), (0, 255, 255)]
+colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (0, 255, 255)]
 c_name = ["blue", "green", "red", "yellow"]
 
 class Detector:
@@ -19,10 +19,10 @@ class Detector:
     (Documentation remains the same)
     """
 
-    DEFAULT_HSV_CORNERS = ((90, 140), (50, 255), (50, 255))  # For blue markers
+    DEFAULT_HSV_CORNERS = ((100, 140), (100, 255), (100, 255))  # More specific blue for markers
     DEFAULT_Q_CORNERS = 5
     DEFAULT_TH_CORNERS = 0.002
-    DEFAULT_HSV_BALL = ((100, 140), (50, 255), (50, 255))  # For blue ball
+    DEFAULT_HSV_BALL = ((73, 101), (111, 255), (42, 255)) # More specific blue for ball
     DEFAULT_Q_BALL = 6
     DEFAULT_TH_BALL = 10 ** (-4)
     DEFAULT_SIZE_CROP_CORNERS = 95 / 3
@@ -55,7 +55,7 @@ class Detector:
         self.min_area = min_area
         self.max_area = max_area
         self.min_circularity = min_circularity
-        self.ball_pos = None
+        self.ball_pos = ball_init_pos
         self.corners = None
         self.show_subimages = show_subimages
         self.corners_missing = True
@@ -93,7 +93,7 @@ class Detector:
 
     def process_frame(self, frame):
         corners = self.detect_corners(frame)
-        ball = self.detect_ball_robust(frame)
+        ball = self.detect_ball(frame)
         return corners, ball
 
     def get_cropped(self, im: np.ndarray, pos: np.ndarray, h_p: float, w_p: float):
@@ -359,38 +359,12 @@ class Detector:
         c = (coords_ul_sub_im + center_offset).astype("float32")
         return c, False
 
-    def detect_ball_robust(
+    def detect_ball(
         self,
         im: np.ndarray,
         show_rectangle: bool = False,
         mask_corner=False,
         mask_initial=True,
-    ):
-        hsv_ranges = [
-            self.hsv_params_ball,
-            ((0, 20), (100, 255), (100, 255)),  # Wider red/orange range
-            ((160, 180), (100, 255), (100, 255)),  # Another red/orange range
-        ]
-
-        for hsv_params in hsv_ranges:
-            ball_pos, found = self._detect_ball_with_params(
-                im, hsv_params, show_rectangle, mask_corner, mask_initial
-            )
-            if found:
-                self.ball_pos = ball_pos
-                self.is_ball_found = True
-                return ball_pos
-
-        self.is_ball_found = False
-        return np.array([np.nan, np.nan])
-
-    def _detect_ball_with_params(
-        self,
-        im: np.ndarray,
-        hsv_params,
-        show_rectangle: bool,
-        mask_corner: bool,
-        mask_initial: bool,
     ):
         if self.is_ball_found:
             if mask_corner:
@@ -409,45 +383,35 @@ class Detector:
                 im, draw=show_rectangle
             )
         else:
-            # if self.ball_pos is not None:
-            print("\n\n\nBALL NOT FOUND\n\n\n")
-            if mask_initial:
-                for i in range(4):
-                    if not np.isnan(self.corners[i, 0]):
-                        cv2.circle(
-                            im,
-                            tuple(np.round(self.corners[i, :]).astype(int)[::-1]),
-                            10,
-                            (0, 0, 255),
-                            -1,
-                        )
-                    cv2.circle(
-                        im,
-                        tuple(np.round(self.fixed_corners[i, :]).astype(int)[::-1]),
-                        10,
-                        (0, 0, 255),
-                        -1,
-                    )
+            # Search the whole image if ball is not found
+            cropped_ball_im = im
+            coords_ul_cropped_img = np.array([0, 0])
 
-            ul, dr = self.default_coords_subimage_ball
-            cropped_ball_im, coords_ul_cropped_img = (
-                im[ul[0] : dr[0], ul[1] : dr[1], :],
-                ul,
-            )
-        sub_masked, mask = mask_hsv(cropped_ball_im, hsv_params)
+        sub_masked, mask = mask_hsv(cropped_ball_im, self.hsv_params_ball)
 
         # Add Gaussian blur to smooth noise before contour extraction
         mask = cv2.GaussianBlur(mask, (5, 5), 0)
 
-        c_local, is_ball_found = detect_gaussian_robust(
+        c_local, self.is_ball_found = detect_gaussian_robust(
             mask, 4, self.q_ball, self.th_ball, show_sub=self.show_subimages
         )
-        if not is_ball_found:
-            return np.array([np.nan, np.nan]), False
 
-        # print(c_local)
+        if not self.is_ball_found:
+            return np.array([np.nan, np.nan])
+
         c = (coords_ul_cropped_img + c_local).astype("float32")  # (x,y)
-        return c, True
+
+        # Geometric safety check: ensure the detected ball is not a corner
+        if self.corners is not None and not np.isnan(self.corners).any():
+            min_dist_to_corner = np.min(np.linalg.norm(self.corners - c, axis=1))
+
+            # If the ball is too close to any corner, it's likely a false positive
+            if min_dist_to_corner < 30:  # 30 pixels threshold
+                self.is_ball_found = False
+                return np.array([np.nan, np.nan])
+
+        self.ball_pos = c
+        return c
 
     def draw_corners(self, frame: np.ndarray):
         for i in range(self.corners.shape[0]):
