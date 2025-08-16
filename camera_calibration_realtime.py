@@ -1,6 +1,9 @@
 # Author: Aswin Ramachandran
 # https://markhedleyjones.com/projects/calibration-checkerboard-collection
 
+import sys
+sys.path.append('/Users/dimi/py-OCamCalib/src') # Add the path to your local py-OCamCalib clone
+
 import cv2
 import numpy as np
 import time
@@ -149,7 +152,7 @@ def calibrate_camera():
     objp *= 0.024
 
     # Capture images from camera
-    cap = cv2.VideoCapture(1)  # incdex 0 should point to the razer camera
+    cap = cv2.VideoCapture(0)  # incdex 0 should point to the razer camera
 
     if not cap.isOpened():
         print("Error: Could not open camera.")

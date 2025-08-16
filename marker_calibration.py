@@ -15,7 +15,7 @@ def mouse_callback(event, x, y, flags, param):
 def calibrate_markers():
     """Interactive marker calibration tool"""
     # Capture frame
-    cap = cv2.VideoCapture(1)
+    cap = cv2.VideoCapture(0)
     ret, frame = cap.read()
     cap.release()
     

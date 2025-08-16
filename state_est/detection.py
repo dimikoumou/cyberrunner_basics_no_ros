@@ -19,10 +19,10 @@ class Detector:
     (Documentation remains the same)
     """
 
-    DEFAULT_HSV_CORNERS = ((100, 140), (100, 255), (100, 255))  # More specific blue for markers
+    DEFAULT_HSV_CORNERS = ((79, 140), (138, 255), (125, 255))  # More specific blue for markers
     DEFAULT_Q_CORNERS = 5
     DEFAULT_TH_CORNERS = 0.002
-    DEFAULT_HSV_BALL = ((73, 101), (111, 255), (42, 255)) # More specific blue for ball
+    DEFAULT_HSV_BALL = ((72, 132), (119, 255), (63, 255)) # More specific blue for ball
     DEFAULT_Q_BALL = 6
     DEFAULT_TH_BALL = 10 ** (-4)
     DEFAULT_SIZE_CROP_CORNERS = 95 / 3
@@ -359,6 +359,20 @@ class Detector:
         c = (coords_ul_sub_im + center_offset).astype("float32")
         return c, False
 
+    def _polygon_mask(self, shape, corners, ul=np.array([0, 0])):
+        """
+        Build a binary mask of a quadrilateral defined by `corners` with optional
+        offset `ul` (useful when masking a cropped subimage).
+        `corners` are expected in (row, col) = (y, x) format as used elsewhere in this file.
+        """
+        mask = np.zeros(shape[:2], dtype=np.uint8)
+        if corners is None or np.isnan(corners).any():
+            return mask  # empty mask – nothing allowed
+        # Shift corners by UL offset and convert to (x, y) for OpenCV fill
+        pts = (corners - ul).astype(np.int32)[:, ::-1]  # to (x, y)
+        cv2.fillConvexPoly(mask, pts, 255)
+        return mask
+
     def detect_ball(
         self,
         im: np.ndarray,
@@ -366,6 +380,7 @@ class Detector:
         mask_corner=False,
         mask_initial=True,
     ):
+        # Decide ROI (either predictive crop or full frame)
         if self.is_ball_found:
             if mask_corner:
                 corner_ball = self.is_ball_in_corner()
@@ -383,15 +398,24 @@ class Detector:
                 im, draw=show_rectangle
             )
         else:
-            # Search the whole image if ball is not found
+            # Search the whole image if ball is not found – but restrict to inner quad
             cropped_ball_im = im
             coords_ul_cropped_img = np.array([0, 0])
 
+        # Build polygon mask for the chosen ROI using the 4 detected corners
+        poly_mask = self._polygon_mask(cropped_ball_im.shape, self.corners, coords_ul_cropped_img)
+
+        # HSV mask for the ball, then restrict by polygon mask
         sub_masked, mask = mask_hsv(cropped_ball_im, self.hsv_params_ball)
+
+        # Restrict to within polygon only
+        if poly_mask is not None:
+            mask = cv2.bitwise_and(mask, poly_mask)
 
         # Add Gaussian blur to smooth noise before contour extraction
         mask = cv2.GaussianBlur(mask, (5, 5), 0)
 
+        # Run robust Gaussian detection on the masked area
         c_local, self.is_ball_found = detect_gaussian_robust(
             mask, 4, self.q_ball, self.th_ball, show_sub=self.show_subimages
         )
@@ -401,12 +425,17 @@ class Detector:
 
         c = (coords_ul_cropped_img + c_local).astype("float32")  # (x,y)
 
-        # Geometric safety check: ensure the detected ball is not a corner
+        # Geometric safety check: ensure detection lies strictly inside polygon and not a corner
         if self.corners is not None and not np.isnan(self.corners).any():
+            # Check distance to corners
             min_dist_to_corner = np.min(np.linalg.norm(self.corners - c, axis=1))
-
-            # If the ball is too close to any corner, it's likely a false positive
             if min_dist_to_corner < 30:  # 30 pixels threshold
+                self.is_ball_found = False
+                return np.array([np.nan, np.nan])
+            # Check point-in-polygon
+            contour = self.corners[:, ::-1].astype(np.float32).reshape((-1, 1, 2))  # (x,y) for OpenCV
+            inside = cv2.pointPolygonTest(contour, (float(c[1]), float(c[0])), False)  # supply (x,y)
+            if inside < 0:  # outside
                 self.is_ball_found = False
                 return np.array([np.nan, np.nan])
 

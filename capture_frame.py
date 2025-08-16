@@ -19,7 +19,7 @@ class CameraCaptureThread(threading.Thread):
     def run(self):
         # Try using AVFOUNDATION; if issues persist, consider using the default backend:
         # self.cap = cv2.VideoCapture(self.camera_index)
-        self.cap = cv2.VideoCapture(self.camera_index, cv2.CAP_AVFOUNDATION)
+        self.cap = cv2.VideoCapture(0, cv2.CAP_AVFOUNDATION)
 
         # Set MJPEG fourcc and camera properties
         fourcc = cv2.VideoWriter_fourcc(*'MJPG')
