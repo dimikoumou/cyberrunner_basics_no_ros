@@ -23,7 +23,7 @@ DXL0_ID = 1
 DXL1_ID = 2
 
 # Communication settings (example for macOS; change as needed)
-DEVICENAME = '/dev/tty.usbserial-FT79212K'  # Replace with your device name
+DEVICENAME = '/dev/tty.usbserial-FTA2U13I'  # Default device name (can be overridden via --port)
 BAUDRATE = 1000000  # 1M bps
 
 # Torque control flags
@@ -48,16 +48,21 @@ def convert_to_unsigned_16(value):
     return value
 
 
-def setup_motors():
+def setup_motors(devicename: str = None):
     """
     Initialize the communication port and packet handler for the Dynamixel motors,
     and enable the torque for both motors.
+
+    Parameters:
+        devicename (str, optional): Serial port path. If None, uses module DEVICENAME.
 
     Returns:
         tuple: (portHandler, packetHandler) if setup is successful; otherwise, (None, None).
     """
     # Create a PortHandler for serial communication.
-    portHandler = PortHandler(DEVICENAME)
+    port_name = devicename if devicename else DEVICENAME
+    print(f"Opening Dynamixel port: {port_name} @ {BAUDRATE}")
+    portHandler = PortHandler(port_name)
     # Create a PacketHandler to manage protocol-specific operations.
     packetHandler = PacketHandler(PROTOCOL_VERSION)
 
