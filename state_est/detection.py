@@ -19,10 +19,10 @@ class Detector:
     (Documentation remains the same)
     """
 
-    DEFAULT_HSV_CORNERS = ((79, 140), (138, 255), (125, 255))  # More specific blue for markers
+    DEFAULT_HSV_CORNERS = ((85, 120), (82, 255), (76, 255))  # More specific blue for markers
     DEFAULT_Q_CORNERS = 5
     DEFAULT_TH_CORNERS = 0.002
-    DEFAULT_HSV_BALL = ((72, 132), (119, 255), (63, 255)) # More specific blue for ball
+    DEFAULT_HSV_BALL = ((75, 100), (68, 255), (57, 255)) # More specific blue for ball
     DEFAULT_Q_BALL = 6
     DEFAULT_TH_BALL = 10 ** (-4)
     DEFAULT_SIZE_CROP_CORNERS = 95 / 3
