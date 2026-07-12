@@ -97,3 +97,8 @@ calib_images/
 *.mp3
 *.aac
 state_est/demo_output/
+# RL sim generated artifacts
+rl_sim/runs/
+rl_sim/models/
+rl_sim/*.png
+rl_sim/*.avi
