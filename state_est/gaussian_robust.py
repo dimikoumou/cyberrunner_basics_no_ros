@@ -42,6 +42,13 @@ def detect_gaussian(mask, j, q, th, show_sub, use_contour=True):
     - Additional filtering for the ball case is applied based on circularity and area constraints.
     - If visualization (`show_sub=True`) is enabled, intermediate images are displayed.
     """
+    # Guard: if the sub-image is missing or empty (e.g. the crop fell outside the
+    # frame because markers/frame are at the wrong resolution), report not-found
+    # instead of crashing. NOTE: `mask is None` is the correct check here --
+    # `mask.all() == None` is always False (numpy .all() never returns None).
+    if mask is None or mask.size == 0:
+        return np.array([0.0, 0.0]), False
+
     if not use_contour:
         X = np.array(np.where(mask > 0)).T
         # print(X)
@@ -106,10 +113,7 @@ def detect_gaussian(mask, j, q, th, show_sub, use_contour=True):
             contours = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE)[0]
             if len(contours) == 0:
                 print(f"[in gaussian robust] MASK: no contour found for {j}")
-                # print("mask", mask)
-                if mask.all() == None: # TODO: ask Thomas: was this supposed to be all or any? without it i got an error
-                    print("mask is None [gaussian robust]")
-                    
+                # (None/empty mask is already handled at the top of this function.)
                 c = (np.asarray(mask.shape) - 1.0) / 2.0
                 blob_found = False
             else:

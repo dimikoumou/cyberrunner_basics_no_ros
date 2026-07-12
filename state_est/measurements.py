@@ -52,12 +52,27 @@ class Measurements:
         Process the frame to compute the angles of the plate and the position of the ball in the maze frame {m}.
 
         Args :
-            frame: np.ndarray, dim: (400, 640)
+            frame: np.ndarray, must match the (scaled) calibration resolution,
+                   i.e. calibration_resolution / scale_factor -> (360, 640) here.
         """
-        # NOTE: the prints here are useful to debug the estuimation of the angles of the plate 
+        # Resolution guard: the OCamCalib cam2world/world2cam functions and the
+        # marker coordinates are only valid at the calibration resolution (after
+        # OcamModel.scale). Feeding a different-size frame silently corrupts every
+        # angle/ball estimate and makes the marker crops fall off the image -- the
+        # root cause of the historical "Unable to find corner" failures. Fail loudly.
+        exp_h, exp_w = int(self.plate_pose.o.height), int(self.plate_pose.o.width)
+        if frame.shape[:2] != (exp_h, exp_w):
+            raise ValueError(
+                f"Frame is {frame.shape[1]}x{frame.shape[0]} (WxH) but the model "
+                f"expects {exp_w}x{exp_h}. The input must be at the calibration "
+                f"resolution divided by the OcamModel scale factor. Capture/undistort "
+                f"at the calibrated resolution (see capture_frame.py) before estimating."
+            )
+
+        # NOTE: the prints here are useful to debug the estuimation of the angles of the plate
         # and the cam2world model as we print out the location of the inner corrners before
         # and after the undistortion.
-        
+
         # print("in process_frame, shape of the frame is: ", frame.shape)
         if self.plate_pose.T__W_C is None:
             self.camera_localization(frame)

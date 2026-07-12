@@ -21,17 +21,33 @@ class CameraCaptureThread(threading.Thread):
         # self.cap = cv2.VideoCapture(self.camera_index)
         self.cap = cv2.VideoCapture(self.camera_index, cv2.CAP_AVFOUNDATION)
 
-        # Set MJPEG fourcc and camera properties
+        # Set MJPEG fourcc and camera properties.
+        # IMPORTANT: capture at the SAME resolution the OCamCalib model was
+        # calibrated at (1920x1080 -- see state_est/calib_razer_data.txt). The
+        # state-estimation geometry assumes calibration_resolution / 3; capturing
+        # at 1280x720 was the root cause of the "Unable to find corner" failures,
+        # because the marker crops then fell outside the (too-short) frame.
         fourcc = cv2.VideoWriter_fourcc(*'MJPG')
         self.cap.set(cv2.CAP_PROP_FOURCC, fourcc)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
         self.cap.set(cv2.CAP_PROP_FPS, 60)
 
         if not self.cap.isOpened():
             print("Camera could not be opened!")
             self.stopped = True
             return
+
+        # Verify the camera actually accepted the requested resolution -- some
+        # cameras silently fall back to a different size.
+        actual_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        if (actual_w, actual_h) != (1920, 1080):
+            print(
+                f"WARNING: camera returned {actual_w}x{actual_h}, not the "
+                f"calibrated 1920x1080. State estimation will be inaccurate "
+                f"until the camera runs at the calibration resolution."
+            )
 
         while not self.stopped:
             ret, frame = self.cap.read()

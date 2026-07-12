@@ -521,7 +521,9 @@ class DetectorFixedPts(Detector):
         c = (coords_ul_sub_im + c_local).astype("float32")
         
         if not blob_found:
-            print("Unable to find corner {}".format(i + 1))
-            exit()
+            # Previously this called exit(), which killed the whole process on a
+            # single missed reference corner. Report it and return not-found so the
+            # caller can decide (skip frame, re-acquire, etc.) instead of crashing.
+            print("Unable to find corner {} (returning not-found)".format(i + 1))
 
         return c, blob_found

@@ -32,11 +32,15 @@ def get_circle_boundary(image_path, config_txt, verbose=False):
     if radius < 1:
         raise Exception("Detected circle is too small.")
     
+    # Define radius_int unconditionally -- it is part of the return value below,
+    # so it must exist even when verbose is False (previously this only ran inside
+    # the verbose block, crashing the normal path with UnboundLocalError).
+    radius_int = int(radius)
+
     # If verbose, display the detected circle on the image
     if verbose:
         output = img.copy()
         center = (int(x), int(y))
-        radius_int = int(radius)
         cv2.circle(output, center, radius_int, (0, 255, 0), 2)
         cv2.circle(output, center, 2, (0, 0, 255), 3)
         cv2.imshow("Detected Circle", output)

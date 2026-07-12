@@ -96,3 +96,4 @@ calib_images/
 *.wav
 *.mp3
 *.aac
+state_est/demo_output/
