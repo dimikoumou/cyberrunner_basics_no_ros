@@ -23,7 +23,18 @@ agent that already knows roughly how to play.
 | `maze_layout.py` | The maze geometry as **swappable data** (walls, holes, path checkpoints, goal). Placeholder serpentine layout; replace with a trace of the real BRIO board later. |
 | `maze_env.py` | Gymnasium environment. Observation and action match the real system (see below). Potential-based reward on progress along the path. |
 | `test_sim.py` | Sanity checks: validates the env, renders the maze, and runs a scripted PD controller to prove the maze is solvable. |
-| `train_sac.py` | Trains a model-free agent (SAC) and saves a learning curve + a rollout video. |
+| `train_sac.py` | Single-core SAC trainer (off-policy, sample-efficient, one env). |
+| `train_ppo.py` | **Multi-core PPO trainer** (on-policy): N environments in parallel subprocesses + a Torch update that uses all cores. Recommended for CPU training. |
+
+### A note on using all CPU cores
+
+This simulator is *cheap* to step, so RL wall-clock is dominated by the neural-net
+update in PyTorch, not by stepping environments. To use the whole CPU:
+- `train_ppo.py` runs `n_envs` environments in parallel subprocesses (data collection), and
+- calls `torch.set_num_threads(n_cores)` so the PPO update parallelizes across cores.
+
+SAC (`train_sac.py`) is off-policy with a single env, so it mostly uses one core;
+it's kept for comparison and because it's more sample-efficient per step.
 
 ## The interface (this is what makes sim-to-real work)
 

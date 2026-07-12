@@ -26,7 +26,7 @@ V_NORM = 1.0  # nominal max speed for normalizing velocity (m/s)
 class MazeEnv(gym.Env):
     metadata = {"render_modes": ["rgb_array"], "render_fps": 60}
 
-    def __init__(self, cfg=None, fps=60, max_steps=1200, render_mode=None):
+    def __init__(self, cfg=None, fps=60, max_steps=800, render_mode=None):
         super().__init__()
         self.cfg = cfg if cfg is not None else default_maze()
         self.sim = MazeSim(self.cfg, fps=fps)
@@ -71,30 +71,38 @@ class MazeEnv(gym.Env):
         jitter = self.np_random.uniform(-0.005, 0.005, size=2)
         self.sim.reset(start=self.cfg.start + jitter)
         self._steps = 0
+        self._max_cp = 0
         self._prev_potential = -self._path_remaining()
         return self._obs(), {}
 
     def step(self, action):
+        cp_before = self.sim.checkpoint_idx
         self.sim.step(action)
         self._steps += 1
 
         potential = -self._path_remaining()
         reward = self.progress_scale * (potential - self._prev_potential)
         self._prev_potential = potential
-        reward -= 0.01                                   # step penalty
+        reward -= 0.01                                   # step penalty (finish faster)
         reward -= 0.002 * float(np.sum(np.square(action)))  # mild control effort penalty
+
+        # explicit bonus each time a new checkpoint is reached (discrete signal on
+        # top of the dense shaping)
+        cp_after = self.sim.checkpoint_idx
+        reward += 3.0 * (cp_after - cp_before)
+        self._max_cp = max(self._max_cp, cp_after)
 
         terminated = False
         status = self.sim.status
         if status == "goal":
-            reward += 10.0
+            reward += 20.0
             terminated = True
         elif status == "hole":
-            reward -= 10.0
+            reward -= 5.0        # softer than before: don't make stalling the safe choice
             terminated = True
 
         truncated = self._steps >= self.max_steps
-        info = {"status": status, "checkpoint_idx": self.sim.checkpoint_idx}
+        info = {"status": status, "checkpoint_idx": cp_after, "max_cp": self._max_cp}
         return self._obs(), float(reward), terminated, truncated, info
 
     # ---- rendering ------------------------------------------------------

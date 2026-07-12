@@ -26,7 +26,8 @@ os.makedirs("models", exist_ok=True)
 
 def evaluate(model, n=30, deterministic=True):
     env = MazeEnv()
-    goals, steps_to_goal = 0, []
+    n_cp = len(env.cfg.checkpoints) - 1     # goal index
+    goals, steps_to_goal, max_cps = 0, [], []
     for _ in range(n):
         obs, _ = env.reset()
         done = False
@@ -36,12 +37,14 @@ def evaluate(model, n=30, deterministic=True):
             obs, r, term, trunc, info = env.step(a)
             steps += 1
             done = term or trunc
+        max_cps.append(info["max_cp"])
         if info["status"] == "goal":
             goals += 1
             steps_to_goal.append(steps)
     sr = goals / n
     mean_steps = float(np.mean(steps_to_goal)) if steps_to_goal else float("nan")
-    return sr, mean_steps
+    mean_cp = float(np.mean(max_cps))
+    return sr, mean_steps, mean_cp, n_cp
 
 
 class ProgressCallback(BaseCallback):
@@ -49,14 +52,15 @@ class ProgressCallback(BaseCallback):
     def __init__(self, eval_every=10000, verbose=0):
         super().__init__(verbose)
         self.eval_every = eval_every
-        self.history = []  # (timesteps, success_rate, mean_steps)
+        self.history = []  # (timesteps, success_rate, mean_cp)
 
     def _on_step(self):
         if self.num_timesteps % self.eval_every == 0:
-            sr, ms = evaluate(self.model, n=20)
-            self.history.append((self.num_timesteps, sr, ms))
+            sr, ms, mcp, ncp = evaluate(self.model, n=20)
+            self.history.append((self.num_timesteps, sr, mcp))
             print(f"  [{self.num_timesteps:>7d} steps]  success={sr*100:5.1f}%  "
-                  f"mean_steps_to_goal={ms:.0f}", flush=True)
+                  f"progress={mcp:.1f}/{ncp} checkpoints  "
+                  f"steps_to_goal={ms:.0f}", flush=True)
         return True
 
 
@@ -65,8 +69,8 @@ def main():
     env = MazeEnv()
 
     print("baseline (random policy):")
-    sr0, _ = evaluate(None, n=30)
-    print(f"  success={sr0*100:.1f}%\n")
+    sr0, _, mcp0, ncp = evaluate(None, n=30)
+    print(f"  success={sr0*100:.1f}%  progress={mcp0:.1f}/{ncp} checkpoints\n")
 
     model = SAC(
         "MlpPolicy", env,
@@ -80,16 +84,19 @@ def main():
     model.learn(total_timesteps=total, callback=cb, progress_bar=False)
     model.save("models/sac_maze")
 
-    sr, ms = evaluate(model, n=50)
-    print(f"\nFINAL: success={sr*100:.1f}%  mean_steps_to_goal={ms:.0f}")
+    sr, ms, mcp, ncp = evaluate(model, n=50)
+    print(f"\nFINAL: success={sr*100:.1f}%  progress={mcp:.1f}/{ncp}  mean_steps_to_goal={ms:.0f}")
 
-    # learning curve
+    # learning curve (success rate + progress)
     if cb.history:
-        t, s, _ = zip(*cb.history)
-        plt.figure(figsize=(7, 4))
-        plt.plot(t, np.array(s) * 100, marker="o")
-        plt.xlabel("training timesteps"); plt.ylabel("success rate (%)")
-        plt.title("SAC learning to solve the maze"); plt.grid(alpha=0.3)
+        t, s, cp = zip(*cb.history)
+        fig, ax1 = plt.subplots(figsize=(7, 4))
+        ax1.plot(t, np.array(s) * 100, marker="o", color="tab:blue", label="success %")
+        ax1.set_xlabel("training timesteps"); ax1.set_ylabel("success rate (%)", color="tab:blue")
+        ax2 = ax1.twinx()
+        ax2.plot(t, cp, marker="s", color="tab:green", label="progress (checkpoints)")
+        ax2.set_ylabel(f"mean checkpoints reached (/{ncp})", color="tab:green")
+        plt.title("SAC learning to solve the maze"); ax1.grid(alpha=0.3)
         plt.tight_layout(); plt.savefig(f"{OUT}/learning_curve.png", dpi=110)
         print(f"saved {OUT}/learning_curve.png")
 
