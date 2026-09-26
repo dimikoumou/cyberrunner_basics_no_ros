@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 from plate_env import HardwarePlateEnv  # noqa: E402
-from goal_circle import detect_goal_circle, save_debug  # noqa: E402
+from goal_circle import detect_goal_circle, detect_on_frame, save_debug  # noqa: E402
 
 SNAPSHOT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pd_snapshots")
 SNAPSHOT_EVERY_S = float(os.environ.get("PD_SNAPSHOT_S", "2.0"))  # e.g. 30 for long unattended runs
@@ -80,6 +80,24 @@ KICK_LOCKOUT_S = 1.0    # after a release (2x after a give-up)
 # The goal is detected from the red circle on the sheet at every startup
 # (goal_circle.py), so a new sheet needs no edits. These are only a reference: the
 # centre disc used on 2026-09-26. Set PD_FIXED_GOAL=1 to use them instead.
+# Live goal tracking (swap the sheet mid-run): every GOAL_CHECK_S the red circle
+# is re-detected on the frame the current plate pose came from. A new goal is
+# adopted only after GOAL_CONFIRM consecutive checks agree (within GOAL_AGREE_M) on
+# a circle clearly different from the current one (moved > GOAL_MOVE_M or radius
+# changed > GOAL_RADIUS_CHANGE_M), so hands in view or a half-swapped sheet can't
+# create a false goal. No visible circle -> keep the current goal.
+# (A target-sized capture zone with KD 6 was tried 2026-09-26 on a 9 mm dot: no
+# improvement, 23% vs 30% in the dot -- reverted.)
+# Speed-reference approach (user's step 2): PD rewritten as kd*(v_ref - v) with
+# v_ref = (kp/kd)*e, i.e. identical to kp*e - kd*v -- except that |v_ref| is capped,
+# so a ball far from the goal is brought in at a limited speed instead of being
+# flung at it (far gains alone ask for 2.5 m/s per m of error, 0.375 m/s at 15 cm).
+V_REF_MAX = 0.08  # m/s
+GOAL_CHECK_S = 0.5
+GOAL_CONFIRM = 3
+GOAL_AGREE_M = 0.004
+GOAL_MOVE_M = 0.008
+GOAL_RADIUS_CHANGE_M = 0.005
 GOAL = (-0.0078, 0.0060)
 GOAL_TOLERANCE = 0.0455
 # Direct feedback while watching this live: correcting X and Y together lets the
@@ -115,7 +133,7 @@ def main():
     log_path = os.path.join(LOG_DIR, time.strftime("pd_%Y%m%d_%H%M%S.csv"))
     log = open(log_path, "w")
     log.write("t,episode,step,xb,yb,vx,vy,alpha,beta,dist,in_circle,ball_found,a0,a1,status,i0,i1,k0,k1,kicking,"
-              "c0r,c0c,c1r,c1c,c2r,c2c,c3r,c3c\n")
+              "c0r,c0c,c1r,c1c,c2r,c2c,c3r,c3c,goal_x,goal_y,goal_r\n")
     print(f"logging to {log_path}")
     # max_episode_steps default (600) let one truly-stuck episode (the ledge
     # defect, see note above) burn its entire step budget on repeated futile
@@ -153,10 +171,21 @@ def main():
     env.goal_tolerance = goal_tol
     # Edge guard only where the ball is past the wall threshold AND further out than
     # the goal disc on that side -- a disc drawn near an edge stays reachable.
-    edge_x = max(EDGE_X, abs(goal[0]) + goal_tol)
-    edge_y = max(EDGE_Y, abs(goal[1]) + goal_tol)
-    if edge_x > EDGE_X or edge_y > EDGE_Y:
-        print(f"goal is near an edge: edge guard moved out to |x|>{edge_x:.3f}, |y|>{edge_y:.3f}")
+    def edge_limits(g, r):
+        # Guard only well past the goal circle: with it right at the circle's edge
+        # (e.g. at 10.4 cm for a 9 mm dot at x=9.5 cm) every small overshoot got a
+        # full-tilt shove back -> overshoot the other way -> repeating pattern.
+        # 3 cm beyond the circle, capped 1 cm short of the plate's edge.
+        ex = max(EDGE_X, min(abs(g[0]) + r + 0.03, env._x_half - 0.01))
+        ey = max(EDGE_Y, min(abs(g[1]) + r + 0.03, env._y_half - 0.01))
+        if ex > EDGE_X or ey > EDGE_Y:
+            print(f"goal is near an edge: edge guard moved out to |x|>{ex:.3f}, |y|>{ey:.3f}")
+        return ex, ey
+
+    edge_x, edge_y = edge_limits(goal, goal_tol)
+    goal_cands = []
+    last_goal_check = 0.0
+    n_goal_changes = 0
     t_start = time.time()
     integ = np.zeros(2)
     pos_buf = deque(maxlen=STUCK_WIN)
@@ -231,9 +260,13 @@ def main():
                 # the integral learns the level bias only from a rolling ball, never stiction
                 if dist_now < I_ZONE and not kicking and not stationary:
                     integ = np.clip(integ + KI * e * dt_real, -I_MAX, I_MAX)
+                v_ref = (kp / kd) * e
+                v_ref_mag = float(np.hypot(*v_ref))
+                if v_ref_mag > V_REF_MAX:
+                    v_ref *= V_REF_MAX / v_ref_mag
+                pd = kd * (v_ref - np.array([vx, vy]))
                 action = np.clip(
-                    np.array([kp * gx - kd * vx + integ[0] + kick[0],
-                              kp * gy - kd * vy + integ[1] + kick[1]], dtype=np.float32),
+                    np.array([pd[0] + integ[0] + kick[0], pd[1] + integ[1] + kick[1]], dtype=np.float32),
                     -0.8, 0.8,
                 )
                 # Hard override once near an edge -- full brake straight back toward
@@ -282,7 +315,39 @@ def main():
                           f"{action[0]:.3f},{action[1]:.3f},{info['status']},"
                           f"{integ[0]:.4f},{integ[1]:.4f},{kick[0]:.4f},{kick[1]:.4f},{int(kicking)},"
                           + (",".join(f"{v:.1f}" for v in env.last_inner_corners.ravel())
-                             if getattr(env, "last_inner_corners", None) is not None else ",,,,,,,") + "\n")
+                             if getattr(env, "last_inner_corners", None) is not None else ",,,,,,,")
+                          + f",{goal[0]:.5f},{goal[1]:.5f},{goal_tol:.5f}\n")
+
+                if now - last_goal_check >= GOAL_CHECK_S and getattr(env, "_last_frame", None) is not None:
+                    last_goal_check = now
+                    cand = detect_on_frame(env, env._last_frame)
+                    differs = cand is not None and (
+                        np.hypot(cand[0][0] - goal[0], cand[0][1] - goal[1]) > GOAL_MOVE_M
+                        or abs(cand[1] - goal_tol) > GOAL_RADIUS_CHANGE_M)
+                    if not differs:
+                        goal_cands.clear()
+                    else:
+                        if goal_cands and np.hypot(*(cand[0] - goal_cands[-1][0])) > GOAL_AGREE_M:
+                            goal_cands.clear()
+                        goal_cands.append(cand)
+                        if len(goal_cands) >= GOAL_CONFIRM:
+                            c = np.median([g for g, _ in goal_cands], axis=0)
+                            goal = (float(c[0]), float(c[1]))
+                            goal_tol = float(np.median([r for _, r in goal_cands]))
+                            env.fixed_goal = goal
+                            env.goal = np.array(goal, dtype=np.float32)
+                            env.goal_tolerance = goal_tol
+                            edge_x, edge_y = edge_limits(goal, goal_tol)
+                            # new target: restart the hold and any kick; keep the learned
+                            # level bias (it belongs to the plate, not the sheet)
+                            hold_start = None
+                            kicking, cap_t, lockout_until = False, None, 0.0
+                            kick[:] = 0
+                            pos_buf.clear()
+                            goal_cands.clear()
+                            n_goal_changes += 1
+                            print(f"\n>>> NEW GOAL circle: centre ({goal[0]:+.4f}, {goal[1]:+.4f}) m, "
+                                  f"radius {goal_tol * 1000:.1f} mm <<<\n")
 
                 if now - last_snapshot >= SNAPSHOT_EVERY_S:
                     frame = env._grab_frame()
@@ -314,6 +379,7 @@ def main():
         print(f"\n=== overall: {total_in_circle}/{total_taken} steps in circle ({overall_pct:.1f}%) "
               f"across {episode} episode(s) ===")
         rate = total_taken / max(1e-6, time.time() - t_start)
+        print(f"=== goal changes during run: {n_goal_changes} ===")
         print(f"=== longest continuous hold inside goal circle: {best_hold:.2f} s "
               f"(target {HOLD_TARGET_S:.0f} s, {'SUCCESS' if best_hold >= HOLD_TARGET_S else 'not reached'}), "
               f"~{rate:.1f} steps/s overall, log: {log_path} ===")

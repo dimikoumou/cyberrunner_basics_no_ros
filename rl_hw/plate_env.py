@@ -574,6 +574,7 @@ class HardwarePlateEnv(gym.Env):
             return np.nan, np.nan, 0.0, 0.0, False
         try:
             _, _, inputs, xb, yb = self.pipeline.estimate(frame)
+            self._last_frame = frame  # the frame the current plate pose belongs to
         except Exception as e:
             print(f"[HardwarePlateEnv] estimate() failed on this frame, skipping: {e}")
             return np.nan, np.nan, 0.0, 0.0, False

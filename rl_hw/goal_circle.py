@@ -13,7 +13,7 @@ import cv2
 RED_MIN_HUE = 165
 RED_MIN_SAT = 40
 MIN_RED_PIXELS = 20
-RADIUS_RANGE_M = (0.012, 0.09)   # plausible goal radius
+RADIUS_RANGE_M = (0.005, 0.09)   # plausible goal radius (small dots down to ~1 cm across are fine)
 MAX_CENTER_SPREAD_M = 0.004      # per-frame centre estimates must agree this well
 
 
@@ -24,6 +24,17 @@ def _detect_once(env, frame):
     # Restrict to the valid plate area (excludes most of the frame; the mask still
     # reaches the outer wood, hence the hue test).
     valid = measurements.mask[:, :, 0] > 0
+    # Only inside the paper: the quad spanned by the 4 inner plate markers (tracked
+    # every frame), shrunk 4% toward its centre. The wooden frame edges produce
+    # faint reddish speckles (hue >165) that out-sized small goal dots otherwise.
+    corners = measurements.detector.corners
+    if corners is not None:
+        pts = np.asarray(corners, dtype=np.float64)[:, ::-1]  # (row, col) -> (x, y)
+        ctr = pts.mean(axis=0)
+        quad = (ctr + (pts - ctr) * 0.96).astype(np.int32)
+        paper = np.zeros(valid.shape, np.uint8)
+        cv2.fillConvexPoly(paper, cv2.convexHull(quad), 1)
+        valid &= paper.astype(bool)
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     hue, sat = hsv[:, :, 0], hsv[:, :, 1]
     reddish = ((hue > RED_MIN_HUE) & (sat > RED_MIN_SAT) & valid).astype(np.uint8)
@@ -53,6 +64,25 @@ def _detect_once(env, frame):
     edge = measurements.ball_pos_backproject(pts_undist[1], plate_pose.K, plate_pose.T__C_M)
     radius = float(np.hypot(edge[0] - center[0], edge[1] - center[1]))
     return np.array(center[:2], dtype=float), radius, (float(cx), float(cy), r_px)
+
+
+def detect_on_frame(env, frame):
+    """Single-frame check used while balancing (live goal tracking): `frame` must
+    be the frame the env's current plate pose was estimated from (env._last_frame).
+    Returns (center(2,), radius) or None if no plausible circle is visible (e.g.
+    mid sheet-swap, hands in view)."""
+    try:
+        r = _detect_once(env, frame)
+    except Exception:
+        return None
+    if r is None:
+        return None
+    center, radius, _ = r
+    if not (RADIUS_RANGE_M[0] <= radius <= RADIUS_RANGE_M[1]):
+        return None
+    if abs(center[0]) > env._x_half or abs(center[1]) > env._y_half:
+        return None
+    return center, radius
 
 
 def detect_goal_circle(env, n_frames=9):
