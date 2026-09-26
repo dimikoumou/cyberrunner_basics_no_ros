@@ -54,7 +54,15 @@ def main():
         _, labels, stats, _ = cv2.connectedComponentsWithStats(dilated, connectivity=8)
         biggest_label = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
         component_mask = (labels == biggest_label) & (reddish > 0)
-        ys, xs = np.where(component_mask)
+        # 2026-09-26: the goal is now a FILLED red disc, not an outline. Fitting
+        # through every red pixel of a filled disc badly underestimates the radius
+        # (fit 33px vs ~55px true), so fit the component's outer boundary instead --
+        # correct for a filled disc, and for an outline it's just the ring's outer
+        # edge (off by half the pen width).
+        closed = cv2.morphologyEx(component_mask.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
+        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        outer = max(contours, key=cv2.contourArea).reshape(-1, 2)
+        xs, ys = outer[:, 0], outer[:, 1]
 
         # least-squares circle fit: (x-cx)^2 + (y-cy)^2 = r^2, linearized
         A = np.column_stack([2 * xs, 2 * ys, np.ones(len(xs))]).astype(np.float64)

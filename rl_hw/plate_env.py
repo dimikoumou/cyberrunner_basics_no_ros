@@ -74,6 +74,33 @@ LAST_LEVEL_CACHE_PATH = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "last_level_position.json")
 )
 
+# Outer/fixed corner markers, measured once by rl_hw/measure_fixed_markers.py (or
+# from saved clean frames) -- see _prime_camera_localization for why.
+FIXED_CORNERS_CACHE_PATH = os.path.join(STATE_EST_DIR, "fixed_corners_cache.json")
+
+# Closed-loop tilt control (2026-09-26). Full-range sweeps on the rig
+# (rl_hw/characterize_tilt.py) measured motor3->beta -8.4..+10.6deg at ~100
+# ticks/deg and motor1->alpha +6.2..-5.6deg at ~140 ticks/deg -- but the tick at
+# which a given angle occurs was NOT repeatable on motor3 (m3=2300 read +5.4deg
+# once and -1.7deg later), so any fixed action->tick map (the old approach)
+# commands the wrong tilt. Instead an action is a TARGET ANGLE and the motors are
+# corrected every step against the camera-measured angle.
+TILT_MAX_DEG = 5.0                    # |action|=1 -> 5deg, inside both axes' measured range
+TICKS_PER_DEG = {1: -140.0, 3: 100.0}  # d(ticks)/d(angle): +m1 lowers alpha, +m3 raises beta
+TILT_GAIN = 0.5                        # fraction of the measured angle error corrected per step
+MAX_TICKS_PER_STEP = 250
+TICK_BOUNDS = {1: (1800, 3900), 3: (700, 3800)}  # where each axis's angle plateaus (measured)
+LEVEL_TOL_DEG = 0.4
+# Camera-frame angle at which the ball does NOT accelerate, i.e. true gravity level
+# expressed in the camera's (outer-frame) world frame. Estimated 2026-09-26 by
+# regressing ball acceleration on measured tilt over a whole PD run
+# (pd_20260926_142924.csv, n=1133 off-wall samples, r=0.92 on both axes):
+# ax = 0 at beta=+3.00deg, ay = 0 at alpha=-0.82deg. Without it, "level" (0,0)
+# rolled the ball into the (-x,-y) corner every time. Refit on the first run WITH
+# the offset (pd_20260926_143132.csv, Savitzky-Golay accel, n=2759, r=0.98/0.97,
+# run halves agree within 0.06deg): beta0=+2.55, alpha0=-1.13.
+LEVEL_OFFSET_DEG = (-1.1, 2.55)  # (alpha, beta)
+
 GOAL_MARGIN = 0.04          # meters, inward margin from the plate's usable extent
 GOAL_TOLERANCE = 0.015      # meters, radius of the "balance here" circle
 IN_CIRCLE_BONUS = 1.0       # per-step reward bonus while the ball is inside that circle
@@ -129,6 +156,16 @@ def _load_motor_calibration(path):
     return result
 
 
+def _symmetric_range(min_pos, center_pos, max_pos):
+    """(center-h, center, center+h) with h = the smaller side. 2026-09-26: with the
+    leveled center sitting far from the middle of the safe bounds (e.g. m3 level
+    2515 in 1926..4090), the piecewise map gave the same |action| a 2.7-8.6x
+    different tilt depending on direction -- the controller's effective gain
+    flipped with the sign of its own output. Equal ticks per unit both ways."""
+    h = min(center_pos - min_pos, max_pos - center_pos)
+    return (center_pos - h, center_pos, center_pos + h)
+
+
 def map_action_to_position(a, min_pos, center_pos, max_pos):
     """Piecewise-linear map: a in [-1,0] -> [min_pos, center_pos], a in [0,1] -> [center_pos, max_pos]."""
     a = float(np.clip(a, -1.0, 1.0))
@@ -159,6 +196,8 @@ class HardwarePlateEnv(gym.Env):
         show_image=False,
         fixed_goal=None,
         max_action_delta=0.35,
+        allow_unstick=False,
+        tilt_control=True,
     ):
         """
         fixed_goal: None keeps the original behavior (a new random goal every
@@ -172,6 +211,10 @@ class HardwarePlateEnv(gym.Env):
             this would slam the plate between opposite extremes every ~18ms -- hard on
             the hardware and low-value training data. The agent still sees/learns over
             the full [-1,1] action space; this only rate-limits actuation.
+        allow_unstick: default False -- disables _attempt_unstick() entirely (no sweep, no
+            violent shake). Those escapes only existed for the glass bezel ledge;
+            with the glass removed (flat paper, 2026-09-26) they just add vibration
+            that can drop the U2D2. A wedged ball then simply ends the episode.
         """
         super().__init__()
         self.control_hz = control_hz
@@ -181,6 +224,11 @@ class HardwarePlateEnv(gym.Env):
         self.max_episode_steps = max_episode_steps
         self.fixed_goal = fixed_goal
         self.max_action_delta = max_action_delta
+        self.allow_unstick = allow_unstick
+        self.tilt_control = tilt_control
+        self._cmd_ticks = {}           # last commanded goal position per motor (tilt_control)
+        self._tilt_target = LEVEL_OFFSET_DEG  # last target (alpha, beta) in degrees
+        self._meas_tilt = None          # last plausible measured (alpha, beta) in degrees
         self._last_commanded_action = np.zeros(2, dtype=np.float32)
         self._pos_history = []
         self._action_history = []
@@ -245,8 +293,21 @@ class HardwarePlateEnv(gym.Env):
         # left the plate tilted enough to fully occlude a fixed reference corner from the
         # camera, crashing this method outright. Calibrating from a known, controlled,
         # already-torqued position removes that variable.
-        for dxl_id, target in zip(self.calibration.keys(), (c for _, c, _ in self.calibration.values())):
+        # 2026-09-26: start from the cached level position when there is one. The
+        # static calibration center for motor3 (2476) is ~1400 ticks off level
+        # since the homing-offset change, i.e. a hard tilt that rolls the ball
+        # straight into a corner before the first episode even starts.
+        startup = {dxl_id: c for dxl_id, (_, c, _) in self.calibration.items()}
+        try:
+            with open(LAST_LEVEL_CACHE_PATH) as f:
+                cached = json.load(f)
+            m1_id, m3_id = sorted(self.calibration.keys())
+            startup[m1_id], startup[m3_id] = int(cached["m1"]), int(cached["m3"])
+        except (OSError, KeyError, ValueError):
+            pass
+        for dxl_id, target in startup.items():
             set_position(self.port_handler, self.packet_handler, dxl_id, target)
+            self._cmd_ticks[dxl_id] = int(target)
         time.sleep(1.5)
 
         self._prime_camera_localization()
@@ -335,6 +396,33 @@ class HardwarePlateEnv(gym.Env):
             self._grab_frame()
 
         measurements = self.pipeline.measurements
+        # 2026-09-26: the fixed markers never move, but since the glass came out the
+        # two left-side ones are intermittently half-hidden behind a strip of the
+        # tilting frame (history-dependent, not a function of the commanded
+        # posture). A half-hidden marker leaves ~5px of blue, detection falls back
+        # onto a wrong blob, and the pose comes out ~30deg off every attempt. Use the
+        # positions measured once from frames where all 4 were cleanly visible.
+        if os.path.exists(FIXED_CORNERS_CACHE_PATH):
+            with open(FIXED_CORNERS_CACHE_PATH) as f:
+                cache = json.load(f)
+            if tuple(cache["resolution_wh"]) != (self._exp_w, self._exp_h):
+                raise RuntimeError(f"{FIXED_CORNERS_CACHE_PATH} was measured at {cache['resolution_wh']}, "
+                                   f"pipeline expects {(self._exp_w, self._exp_h)}")
+            pts = np.array(cache["corners_row_col"], dtype=np.float32)
+            measurements.detector.fixed_corners = pts
+            measurements.plate_pose.camera_localization(pts)
+            R = measurements.plate_pose.T__W_C[:3, :3]
+            if not (R[0, 0] > 0.9 and R[1, 1] < -0.9 and R[2, 2] < -0.9):
+                raise RuntimeError(f"cached fixed corners give an implausible camera pose {np.diag(R)}")
+            frame, t_wait = None, time.time()
+            while frame is None:
+                if time.time() - t_wait > 5.0:
+                    raise RuntimeError("HardwarePlateEnv: no camera frame within 5s while priming")
+                frame = self._grab_frame()
+            measurements.create_mask(frame)
+            print(f"[HardwarePlateEnv] camera localized from cached fixed corners "
+                  f"({cache.get('measured', '?')}), rotation diagonal {np.round(np.diag(R), 3)}")
+            return
         # Outlier-rejection on the 4 corner POINTS doesn't catch every failure mode:
         # confirmed directly that a bad detection can be wrong in a way that's
         # internally self-consistent across many frames (all agreeing on the same
@@ -459,9 +547,74 @@ class HardwarePlateEnv(gym.Env):
         else:
             self._bad_tilt_streak = 0
             self._last_plausible_tilt = (alpha, beta)
+            self._meas_tilt = (float(np.degrees(alpha)), float(np.degrees(beta)))
         return xb, yb, alpha, beta, ball_found
 
+    def _servo_tilt(self, action):
+        """One closed-loop step toward the target tilt for `action`; positive
+        action[0]/action[1] rolls the ball toward +x/+y (the convention every
+        caller, incl. pd_balance.py, assumes). Axis mapping MEASURED on the rig
+        2026-09-26 with this servo holding exact tilts (rl_hw/tilt_probe.py,
+        phase3_logs/tilt_probe_2.log, tilt_probe_3x.log): a pure alpha tilt moves
+        the ball in y (alpha -2.6deg -> dy +0.04..+0.05, dx ~0) and beta moves it in
+        x (beta +2.9 -> +x) -- i.e. ball x <- +beta (motor3), ball y <- -alpha
+        (motor1), NOT action[0]->motor1 as the old tick mapping assumed.
+        Feedforward on the target change plus a proportional correction on the
+        measured error (the camera frame read after the previous command)."""
+        action = np.clip(np.asarray(action, dtype=np.float64), -1.0, 1.0)
+        target = (-action[1] * TILT_MAX_DEG + LEVEL_OFFSET_DEG[0],
+                  action[0] * TILT_MAX_DEG + LEVEL_OFFSET_DEG[1])  # (alpha, beta)
+        meas = self._meas_tilt if self._meas_tilt is not None else self._tilt_target
+        for i, dxl_id in enumerate(DXL_IDS):
+            tpd = TICKS_PER_DEG[dxl_id]
+            delta = (target[i] - self._tilt_target[i]) * tpd + TILT_GAIN * (target[i] - meas[i]) * tpd
+            delta = float(np.clip(delta, -MAX_TICKS_PER_STEP, MAX_TICKS_PER_STEP))
+            lo, hi = TICK_BOUNDS[dxl_id]
+            pos = int(np.clip(self._cmd_ticks.get(dxl_id, (lo + hi) // 2) + delta, lo, hi))
+            self._cmd_ticks[dxl_id] = pos
+            set_position(self.port_handler, self.packet_handler, dxl_id, pos)
+        self._tilt_target = target
+
+    def _hold_tilt(self, action, seconds):
+        """Hold a target tilt for `seconds` with the closed loop running (a single
+        _write_action only applies one correction step)."""
+        t0 = time.time()
+        while time.time() - t0 < seconds:
+            self._write_action(action)
+            time.sleep(self.dt)
+            self._read_state()
+
+    def _servo_level(self, max_s=12.0):
+        """Closed-loop leveling: servo to (0, 0) until both measured angles stay
+        within LEVEL_TOL_DEG for several consecutive frames."""
+        zero = np.zeros(2, dtype=np.float32)
+        self._read_state()
+        t0, ok = time.time(), 0
+        while time.time() - t0 < max_s:
+            self._write_action(zero)
+            time.sleep(self.dt)
+            self._read_state()
+            a, b = self._meas_tilt if self._meas_tilt is not None else (99.0, 99.0)
+            ok = ok + 1 if (abs(a - LEVEL_OFFSET_DEG[0]) < LEVEL_TOL_DEG
+                            and abs(b - LEVEL_OFFSET_DEG[1]) < LEVEL_TOL_DEG) else 0
+            if ok >= 8:
+                break
+        a, b = self._meas_tilt if self._meas_tilt is not None else (np.nan, np.nan)
+        m1, m3 = self._cmd_ticks.get(1), self._cmd_ticks.get(3)
+        if ok >= 8:
+            try:
+                with open(LAST_LEVEL_CACHE_PATH, "w") as f:
+                    json.dump({"m1": m1, "m3": m3}, f)
+            except OSError:
+                pass
+        else:
+            print(f"[HardwarePlateEnv] servo leveling did not settle in {max_s:.0f}s "
+                  f"(alpha={a:+.2f} beta={b:+.2f}, m1={m1} m3={m3}) -- proceeding anyway")
+
     def _write_action(self, action):
+        if self.tilt_control:
+            self._servo_tilt(action)
+            return
         # action[1] (motor3/beta) is inverted relative to yb -- confirmed directly:
         # commanding a sustained action=(0,+1.0) moved yb from -0.111 to -0.123, the
         # OPPOSITE of what +1.0 should mean (push toward +yb). Every "correct toward
@@ -489,7 +642,12 @@ class HardwarePlateEnv(gym.Env):
             set_position(self.port_handler, self.packet_handler, motor_id, pos)
 
     def _recenter_motors(self):
-        for motor_id, (_, center_pos, _) in self.calibration.items():
+        if self.tilt_control:
+            self._write_action(np.zeros(2, dtype=np.float32))
+            return
+        # 2026-09-26: was self.calibration (static centre, motor3 ~1400 ticks off
+        # level), which tilted the plate hard into a corner on every ball_lost.
+        for motor_id, (_, center_pos, _) in self._effective_calibration.items():
             set_position(self.port_handler, self.packet_handler, motor_id, center_pos)
 
     def _level_plate(self, tolerance_deg=0.5, max_iters=20, max_step=150, settle_s=0.8, quick=False):
@@ -512,6 +670,9 @@ class HardwarePlateEnv(gym.Env):
         can tilt it straight back before real step()-level PD control ever
         resumes. A quick, non-exploratory settle avoids re-baiting the trap it
         was just pulled out of; the next real reset() still does a full search."""
+        if self.tilt_control:
+            self._servo_level(max_s=3.0 if quick else 12.0)
+            return
         m1_id, m3_id = sorted(self.calibration.keys())
         _, m1p, _ = self.calibration[m1_id]
         _, m3p, _ = self.calibration[m3_id]
@@ -567,8 +728,8 @@ class HardwarePlateEnv(gym.Env):
         time.sleep(settle_s * 2)
 
         if quick:
-            self._effective_calibration[m1_id] = (m1_min, m1p, m1_max)
-            self._effective_calibration[m3_id] = (m3_min, m3p, m3_max)
+            self._effective_calibration[m1_id] = _symmetric_range(m1_min, m1p, m1_max)
+            self._effective_calibration[m3_id] = _symmetric_range(m3_min, m3p, m3_max)
             return
 
         _, _, alpha, beta, _ = self._read_state()
@@ -635,8 +796,42 @@ class HardwarePlateEnv(gym.Env):
         # match a tiny one on the other, or overshooting the hard safe bound on the
         # short side -- neither is what map_action_to_position's independent
         # negative-half/positive-half interpolation needs.
-        self._effective_calibration[m1_id] = (m1_min, m1p, m1_max)
-        self._effective_calibration[m3_id] = (m3_min, m3p, m3_max)
+        self._effective_calibration[m1_id] = _symmetric_range(m1_min, m1p, m1_max)
+        self._effective_calibration[m3_id] = _symmetric_range(m3_min, m3p, m3_max)
+
+    def _gentle_recover(self, last_xy=None):
+        """Bring a lost ball back into view without shaking (2026-09-26, flat paper).
+
+        The ball is usually 'lost' because it rolled into a corner, where the
+        detector can't separate it from the corner marker / frame shadow. From the
+        leveled plate, tilt slowly AWAY from where it was last seen (or, if that's
+        unknown, away from each corner in turn), one sustained tilt at a time, with
+        small escalating magnitudes, returning to level and checking detection
+        after each. Never a rapid reversal. Returns True once the ball is visible."""
+        def _visible():
+            for _ in range(3):
+                _, _, _, _, found = self._read_state()
+                if found:
+                    return True
+            return False
+
+        self._hold_tilt(np.zeros(2, dtype=np.float32), 0.5)
+        if _visible():
+            return True
+        if last_xy is not None and np.all(np.isfinite(last_xy)) and np.any(np.abs(last_xy) > 0.03):
+            directions = [-np.sign(np.asarray(last_xy, dtype=np.float32))]
+        else:
+            directions = [np.array(d, dtype=np.float32) for d in ((1, 1), (-1, 1), (-1, -1), (1, -1))]
+        for mag in (0.25, 0.35, 0.5):
+            for d in directions:
+                print(f"[HardwarePlateEnv] gentle recovery: tilt {tuple(np.round(d * mag, 2))} for 1.0s")
+                self._hold_tilt((d * mag).astype(np.float32), 1.0)
+                found_mid = _visible()
+                self._hold_tilt(np.zeros(2, dtype=np.float32), 0.4)
+                if found_mid or _visible():
+                    print("[HardwarePlateEnv] gentle recovery: ball visible again")
+                    return True
+        return False
 
     def _attempt_unstick(self, stuck_pos=None):
         """Sweeps the plate hard through both axes -- used when the ball can't be
@@ -650,6 +845,10 @@ class HardwarePlateEnv(gym.Env):
         which motor3's hysteresis has shown repeatedly is NOT reliably flat, so
         ending the sweep there could easily leave the plate tilted enough to re-trap
         the ball right after the sweep."""
+        if not self.allow_unstick:
+            print("[HardwarePlateEnv] unstick disabled (allow_unstick=False) -- not shaking")
+            return False
+
         def _freed(prev_xy):
             xb, yb, _, _, found = self._read_state()
             if not found:
@@ -842,7 +1041,11 @@ class HardwarePlateEnv(gym.Env):
                       f"paper edge")
                 last_log = waited
             if waited - last_unstick >= UNSTICK_EVERY_S:
-                self._attempt_unstick()
+                if self.allow_unstick:
+                    self._attempt_unstick()
+                else:
+                    last_xy = self._prev_ball if np.any(self._prev_ball) else None
+                    self._gentle_recover(last_xy)
                 last_unstick = waited
             xb, yb, alpha, beta, ball_found = self._read_state()
 
@@ -855,7 +1058,9 @@ class HardwarePlateEnv(gym.Env):
         # catching it here avoids starting an episode that's already doomed.
         probe_dir = np.sign(self.goal - np.array([xb, yb])).astype(np.float32)
         probe_dir = np.where(probe_dir == 0, 1.0, probe_dir)
-        for attempt in range(2):
+        for attempt in range(2 if self.allow_unstick else 0):
+            # The probe only exists to trigger _attempt_unstick(); with that disabled
+            # a 1s full-tilt probe just throws a free ball across the flat plate.
             self._write_action(probe_dir)
             time.sleep(1.0)
             self._write_action(np.array([0.0, 0.0], dtype=np.float32))
@@ -897,7 +1102,7 @@ class HardwarePlateEnv(gym.Env):
         if self._lost_count >= BALL_LOST_GRACE_FRAMES:
             self._recenter_motors()
             obs = self._build_obs(self._prev_ball[0], self._prev_ball[1], 0.0, 0.0, alpha, beta)
-            return obs, LOST_BALL_PENALTY, True, False, {"status": "ball_lost"}
+            return obs, LOST_BALL_PENALTY, True, False, {"status": "ball_lost", "ball_found": False}
 
         if not ball_found:
             # Within the grace period: hold the last known position, keep the episode alive.
@@ -912,7 +1117,11 @@ class HardwarePlateEnv(gym.Env):
             ys = [p[1] for p in self._pos_history]
             pos_range = max(max(xs) - min(xs), max(ys) - min(ys))
             mean_action_mag = float(np.mean([np.abs(a).mean() for a in self._action_history]))
-            if pos_range < STUCK_MOVEMENT_THRESHOLD and mean_action_mag > STUCK_ACTION_THRESHOLD:
+            # With unstick disabled (flat paper, no ledge) "not moving under tilt"
+            # just means the tilt is weak -- terminating would re-level and throw
+            # away the episode. Only act on it when the unstick escape is enabled.
+            if (self.allow_unstick and pos_range < STUCK_MOVEMENT_THRESHOLD
+                    and mean_action_mag > STUCK_ACTION_THRESHOLD):
                 print(f"[HardwarePlateEnv] ball appears wedged (moved {pos_range*1000:.1f}mm over "
                       f"{STUCK_CHECK_WINDOW} steps despite mean |action|={mean_action_mag:.2f}) "
                       f"-- attempting to unstick")
@@ -947,7 +1156,7 @@ class HardwarePlateEnv(gym.Env):
         terminated = False
         truncated = self._step_count >= self.max_episode_steps
         obs = self._build_obs(xb, yb, vx, vy, alpha, beta)
-        return obs, reward, terminated, truncated, {"status": status}
+        return obs, reward, terminated, truncated, {"status": status, "ball_found": bool(ball_found)}
 
     def close(self):
         if self._closed:

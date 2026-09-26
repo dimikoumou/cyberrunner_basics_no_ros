@@ -29,6 +29,11 @@ from plate_env import HardwarePlateEnv  # noqa: E402
 
 SNAPSHOT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pd_snapshots")
 SNAPSHOT_EVERY_S = 2.0
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pd_logs")
+# Success criterion (Phase 3): ball held continuously inside the goal circle for
+# this long, measured in wall-clock seconds, not steps -- the real step rate is
+# well below the nominal 55Hz, so a step count would overstate the hold.
+HOLD_TARGET_S = 10.0
 
 # Single fixed (KP, KD) was a real tuning mistake, not just imprecise: lowering
 # KP to stop overshoot AT the goal also weakens correction EVERYWHERE else,
@@ -43,8 +48,18 @@ KP_FAR, KD_FAR = 5.0, 2.0
 KP_NEAR, KD_NEAR = 2.5, 4.0
 GAIN_BLEND_DIST = 0.09  # start easing toward the gentle gains at this distance
 GAIN_BLEND_WIDTH = 0.05  # over this much additional distance
-GOAL = (-0.0093, 0.0080)
-GOAL_TOLERANCE = 0.048
+# 2026-09-26: slow integral on position error. The rig's true level point, fit
+# from each run's own data (ball acceleration vs measured tilt, r~0.98), is
+# stable within a run but moves 0.3-0.5deg between runs (beta0 3.00 -> 2.55 ->
+# 2.98, alpha0 -0.82 -> -1.13 -> -1.41), so no constant LEVEL_OFFSET_DEG stays
+# right; with KP_NEAR the residual bias parked the ball 25-50mm off-centre in a
+# 45.5mm disc. Integrate only near the goal (anti-windup), real wall-clock dt,
+# clamped to +-0.3 action (+-1.5deg), carried across episodes (the bias is).
+KI = 1.0
+I_ZONE = 0.10
+I_MAX = 0.3
+GOAL = (-0.0078, 0.0060)  # re-measured 2026-09-26 (filled red disc, outer-edge fit)
+GOAL_TOLERANCE = 0.0455
 # Direct feedback while watching this live: correcting X and Y together lets the
 # combined vector point diagonally, straight at a corner, instead of going through
 # the middle of an edge on the way back. Once either axis is out near the edge,
@@ -68,9 +83,14 @@ EDGE_X, EDGE_Y = 0.10, 0.085
 
 
 def main():
-    total_steps = int(sys.argv[1]) if len(sys.argv) > 1 else 1000
+    total_steps = int(sys.argv[1]) if len(sys.argv) > 1 else 6000
     max_episodes = int(sys.argv[2]) if len(sys.argv) > 2 else 15
     os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+    os.makedirs(LOG_DIR, exist_ok=True)
+    log_path = os.path.join(LOG_DIR, time.strftime("pd_%Y%m%d_%H%M%S.csv"))
+    log = open(log_path, "w")
+    log.write("t,episode,step,xb,yb,vx,vy,alpha,beta,dist,in_circle,ball_found,a0,a1,status\n")
+    print(f"logging to {log_path}")
     # max_episode_steps default (600) let one truly-stuck episode (the ledge
     # defect, see note above) burn its entire step budget on repeated futile
     # escape attempts. 150 steps (~2.7s of real control time at 55Hz, though
@@ -78,9 +98,19 @@ def main():
     # still generous for genuine balancing but ends a hopeless episode fast
     # enough to let the remaining total_steps budget go toward fresh starts,
     # several of which land clear of the defect entirely.
+    # 2026-09-26: glass removed, ledge gone -- the 150-step cap above (and the
+    # unstick escalation) only existed for the ledge. 150 steps is ~3s of real
+    # time, too short to ever contain a 10s hold: truncation -> reset() ->
+    # re-level + probe tilt throws the ball out of the circle. No shaking at all.
     env = HardwarePlateEnv(
-        fixed_goal=GOAL, goal_tolerance=GOAL_TOLERANCE, max_action_delta=0.5, max_episode_steps=150
+        fixed_goal=GOAL, goal_tolerance=GOAL_TOLERANCE, max_action_delta=0.5,
+        max_episode_steps=1500, allow_unstick=False,
     )
+    t_start = time.time()
+    integ = np.zeros(2)
+    t_prev = None
+    best_hold = 0.0
+    hold_start = None
     try:
         total_in_circle = 0
         total_taken = 0
@@ -104,8 +134,13 @@ def main():
                 )
                 kp = KP_FAR + near_frac * (KP_NEAR - KP_FAR)
                 kd = KD_FAR + near_frac * (KD_NEAR - KD_FAR)
+                t_now = time.time()
+                dt_real = 0.0 if t_prev is None else min(t_now - t_prev, 0.2)
+                t_prev = t_now
+                if dist_now < I_ZONE:
+                    integ = np.clip(integ + KI * np.array([gx, gy]) * dt_real, -I_MAX, I_MAX)
                 action = np.clip(
-                    np.array([kp * gx - kd * vx, kp * gy - kd * vy], dtype=np.float32),
+                    np.array([kp * gx - kd * vx + integ[0], kp * gy - kd * vy + integ[1]], dtype=np.float32),
                     -0.8, 0.8,
                 )
                 # Hard override once near an edge -- full brake straight back toward
@@ -131,11 +166,27 @@ def main():
                 # detector fire and do its job instead of masking it.
                 obs, reward, terminated, truncated, info = env.step(action)
                 dist = float(np.hypot(obs[6], obs[7]))
-                in_circle = dist < GOAL_TOLERANCE
+                # Only a frame where the ball was actually detected counts: during
+                # step()'s not-found grace frames obs holds the frozen last position.
+                ball_found = bool(info.get("ball_found", True))
+                in_circle = ball_found and dist < GOAL_TOLERANCE
                 ep_in_circle += int(in_circle)
                 ep_steps += 1
 
                 now = time.time()
+                # A lone missed detection neither extends nor breaks a hold (the
+                # detector drops single frames on a stationary ball); a detected
+                # frame outside the circle, or a real ball_lost, does break it.
+                if in_circle:
+                    if hold_start is None:
+                        hold_start = now
+                    best_hold = max(best_hold, now - hold_start)
+                elif ball_found or info["status"] == "ball_lost":
+                    hold_start = None
+                log.write(f"{now - t_start:.3f},{episode},{i},{obs[0]:.5f},{obs[1]:.5f},{obs[2]:.4f},"
+                          f"{obs[3]:.4f},{obs[4]:.5f},{obs[5]:.5f},{dist:.5f},{int(in_circle)},{int(ball_found)},"
+                          f"{action[0]:.3f},{action[1]:.3f},{info['status']}\n")
+
                 if now - last_snapshot >= SNAPSHOT_EVERY_S:
                     frame = env._grab_frame()
                     if frame is not None:
@@ -146,7 +197,11 @@ def main():
                 if i % 10 == 0 or info["status"] not in ("running", "in_circle"):
                     print(f"  step {i:4d}: xb={obs[0]:+.4f} yb={obs[1]:+.4f} dist={dist:.4f} "
                           f"{'IN' if in_circle else '  '}  action=({action[0]:+.2f},{action[1]:+.2f})  "
+                          f"I=({integ[0]:+.3f},{integ[1]:+.3f})  "
                           f"status={info['status']}")
+                if best_hold >= HOLD_TARGET_S:
+                    print(f"  reached {HOLD_TARGET_S:.0f}s continuous hold -- stopping")
+                    break
                 if terminated or truncated:
                     print(f"  episode {episode} ended at step {i}: {info['status']}")
                     break
@@ -154,11 +209,19 @@ def main():
             total_taken += ep_steps
             pct = 100 * ep_in_circle / max(1, ep_steps)
             print(f"  episode {episode} summary: {ep_in_circle}/{ep_steps} steps in circle ({pct:.1f}%)")
+            hold_start = None  # a hold never spans a reset()
+            if best_hold >= HOLD_TARGET_S:
+                break
 
         overall_pct = 100 * total_in_circle / max(1, total_taken)
         print(f"\n=== overall: {total_in_circle}/{total_taken} steps in circle ({overall_pct:.1f}%) "
               f"across {episode} episode(s) ===")
+        rate = total_taken / max(1e-6, time.time() - t_start)
+        print(f"=== longest continuous hold inside goal circle: {best_hold:.2f} s "
+              f"(target {HOLD_TARGET_S:.0f} s, {'SUCCESS' if best_hold >= HOLD_TARGET_S else 'not reached'}), "
+              f"~{rate:.1f} steps/s overall, log: {log_path} ===")
     finally:
+        log.close()
         env.close()
 
 

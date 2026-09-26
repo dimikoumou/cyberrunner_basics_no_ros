@@ -128,6 +128,17 @@ current physical state.
   auto-launches the run so the session doesn't need to be babysat, but the root cause is
   physical.
 
+## Phase 3 – result
+
+- **Success: 10.03 s continuous hold inside the red goal disc** (2026-09-26, glass removed, bare paper). All 225 frames in the hold had the ball detected, mean distance 2.7 cm and max 4.27 cm against a 4.55 cm radius. Evidence: `phase3_logs/success/pd_20260926_144455.csv`, snapshots, `phase3_logs/hold_10s_evidence.png`.
+- **What worked:**
+  - **Vision:** outer 4 markers measured once and cached (`state_est/fixed_corners_cache.json`), inner 4 tracked live. Marker/ball HSV set from sampled pixels: corner hue 104–140; ball hue 80–108, saturation ≥ 100, which drops the ball's shadow and keeps it detected over the red disc.
+  - **Actuation:** closed-loop tilt control on camera-measured angles (`_servo_tilt`) instead of fixed tick maps. Axis mapping measured: ball x ← beta (motor 3), ball y ← alpha (motor 1).
+  - **Bias:** level offset fitted from log data (ball acceleration vs tilt), plus a slow integral term.
+- **Final gains:** PD unchanged (KP_FAR/KD_FAR = 5/2, KP_NEAR/KD_NEAR = 2.5/4, clip ±0.8, max_action_delta 0.5). New: KI = 1.0 (integrates only within 0.10 m of the goal, capped at ±0.3). TILT_MAX = 5° per unit action. LEVEL_OFFSET (alpha, beta) = (−1.1°, +2.55°).
+- **Progression (one change at a time):** 0 s (axes swapped, open-loop ticks) → 2.11 s (closed loop + axis fix + level offset) → 4.84 s (offset refit) → 9.15 s (integral term) → 10.03 s (ball hue 104→108, which removed ball-lost resets on the red disc).
+- **Anything odd:** the true level point moves 0.3–0.5° between runs; the integral term absorbs it, and the x integral often sits near its cap. Velocity is computed with dt = 1/55 s while the loop runs at ~21 Hz, so the effective D gain is ~2.4× nominal (a ~1.45 Hz near-goal oscillation remains). Violent shake removed; a lost ball is recovered with gentle tilts. In-circle fraction on the success run was 52%, so a 10 s hold is not yet reliable.
+
 ## Results summary
 
 | Task | Result |

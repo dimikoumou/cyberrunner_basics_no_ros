@@ -51,8 +51,12 @@ class Detector:
     # threshold miss). 60 keeps clear margin below the observed range while still
     # well above white paper/wood background saturation (background hue also
     # falls outside 43-140 regardless, so this isn't relying on saturation alone).
+    # 2026-09-26, glass removed (bare paper): re-measured from live frames. Markers
+    # read H 105-135 / S 54-255 / V 7-110; the ball body reads H 90-102. minHue
+    # 43 -> 104 separates ball from marker by colour instead of relying only on
+    # gaussian_robust's MAX_CORNER_AREA size cap.
     DEFAULT_HSV_CORNERS = (
-        (43, 140),  # (minHue, maxHue)
+        (104, 140),  # (minHue, maxHue)
         (60, 255),  # (minSat, maxSat)
         (9, 255),
     )  # (minVal, maxVal)
@@ -68,9 +72,19 @@ class Detector:
     # (176->236px, circ 0.77->0.93) and a shadowed corner sample (138->169px, circ
     # 0.68->0.85) -- both improve, and the frame's other blobs (corner markers/noise)
     # still fail the area threshold (58-71px), so no new false-positive risk.
+    # 2026-09-26, glass removed: on bare white paper the ball casts a bluish shadow
+    # (H 90-110, S median 52) that the old (60,115)/(35,230) range swallowed, giving
+    # ~1000px non-circular blobs. Measured ball body: H 90-102, S 142-255 (median
+    # 207; maxSat 230 was clipping its core). minSat 100 keeps 99% of the ball and
+    # drops ~87% of the shadow; maxHue 104 keeps it clear of the markers (105+).
+    # maxHue 104 -> 108 (2026-09-26, later): over the RED goal disc the ball's rim
+    # mixes with red and its hue tail runs 104-120; at 104 the real detector found
+    # it in 50/52 run snapshots on the disc (3 consecutive misses = ball_lost, which
+    # ended 3 episodes mid-hold at dist<0.02), at 108 in 52/52, still 18/18 on white,
+    # and marker blobs only start appearing from ~112.
     DEFAULT_HSV_BALL = (
-        (60, 115),  # (minHue, maxHue)
-        (35, 230),  # (minSat, maxSat)
+        (80, 108),  # (minHue, maxHue)
+        (100, 255),  # (minSat, maxSat)
         (15, 255),
     )  # (minVal, maxVal)
     DEFAULT_Q_BALL = 6  # gaussian detection param -> q-th quentile
@@ -502,7 +516,7 @@ class DetectorFixedPts(Detector):
         # below the old minSat=125/minVal=40, a reproducible threshold miss, not
         # noise.
         hsv_corners = (
-            (43, 140),  # (minHue, maxHue)
+            (104, 140),  # (minHue, maxHue) -- see Detector.DEFAULT_HSV_CORNERS, 2026-09-26
             (60, 255),  # (minSat, maxSat)
             (20, 255),  # (minVal, maxVal)
         )

@@ -1,0 +1,39 @@
+{
+  "resolution_wh": [
+    640,
+    360
+  ],
+  "corners_row_col": [
+    [
+      278.55828857421875,
+      153.67391967773438
+    ],
+    [
+      278.2513427734375,
+      494.2381896972656
+    ],
+    [
+      86.02796936035156,
+      490.37518310546875
+    ],
+    [
+      91.02083587646484,
+      151.4166717529297
+    ]
+  ],
+  "n_frames": 4,
+  "max_dev_px": [
+    0.7476693987846375,
+    0.561309814453125,
+    0.6216561794281006,
+    1.3257575035095215
+  ],
+  "sources": [
+    "posture_old_level_again.png",
+    "posture_json_center_2674_2476.png",
+    "cam0.jpg",
+    "posture_old_level_2712_3865.png"
+  ],
+  "measured": "2026-09-26 14:02:25",
+  "_note": "Outer/fixed markers, measured from saved 2026-09-26 frames where all 4 were fully visible (left pair is intermittently half-hidden by the tilting frame since the glass came out). Re-measure with rl_hw/measure_fixed_markers.py if the camera or outer frame moves."
+}
