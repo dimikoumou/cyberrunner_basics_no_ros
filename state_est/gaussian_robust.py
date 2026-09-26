@@ -111,13 +111,24 @@ def detect_gaussian(mask, j, q, th, show_sub, use_contour=True):
             # cv.imshow("mask eroded and dilated"+ str(j), mask)
             # TODO maybe add some dilation
             contours = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE)[0]
-            if len(contours) == 0:
-                print(f"[in gaussian robust] MASK: no contour found for {j}")
-                # (None/empty mask is already handled at the top of this function.)
+            # The ball and the corner markers are both blue-ish (overlapping HSV
+            # ranges), and corner detection had no upper size bound -- just took the
+            # single largest contour in its search window. Confirmed directly: when
+            # the ball sits on/near a corner marker, its (much bigger) blob wins that
+            # comparison, silently replacing the tracked corner position with the
+            # ball's position. Once that happens, predictive cropping keeps searching
+            # around wherever the ball was, not the real marker, so the marker never
+            # gets correctly reacquired even after the ball rolls away. A real corner
+            # marker measured ~17-63px here; a real ball ~150-500px -- reject
+            # anything ball-sized so a nearby ball can't be mistaken for the marker.
+            MAX_CORNER_AREA = 120
+            candidates = [c for c in contours if cv.contourArea(c) < MAX_CORNER_AREA]
+            if not candidates:
+                print(f"[in gaussian robust] MASK: no plausibly-corner-sized contour found for {j}")
                 c = (np.asarray(mask.shape) - 1.0) / 2.0
                 blob_found = False
             else:
-                contour = max(contours, key=cv.contourArea)
+                contour = max(candidates, key=cv.contourArea)
                 M = cv.moments(contour)
                 if M["m00"] != 0:
                     cx = M["m10"] / M["m00"]
@@ -141,31 +152,41 @@ def detect_gaussian(mask, j, q, th, show_sub, use_contour=True):
             # cv.imshow("mask eroded and dilated", mask)
 
             contours = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE)[0]
-            if len(contours) == 0:
-                c = np.asarray(mask.shape) / 2.0
-                blob_found = False
-            else:
-                contour = max(contours, key=cv.contourArea)
+            # Only a MINIMUM area was ever enforced here, no maximum -- fine as long
+            # as the search window was always small (the ball is the only plausible
+            # blob a ~30-50px predictive crop could contain). Once ball detection
+            # gained a whole-frame fallback for when the ball isn't where expected,
+            # that assumption broke: under dimmer lighting a large shadowed/background
+            # region can satisfy the ball's HSV range too, and picking the single
+            # largest contour happily accepted a ~7500px^2 blob (a real ball here is
+            # ~150-350px^2) as "the ball", producing physically impossible positions.
+            # Filter to a plausible size+shape range FIRST, then pick the most
+            # circular candidate within it, so a coexisting oversized false blob
+            # doesn't shadow out the real (smaller) ball even when both are present.
+            MIN_BALL_AREA, MAX_BALL_AREA = 110, 500
+            candidates = []
+            for contour in contours:
                 area = cv.contourArea(contour)
+                if not (MIN_BALL_AREA < area < MAX_BALL_AREA):
+                    continue
                 perimeter = cv.arcLength(contour, True)
                 if perimeter == 0:
-                    circularity = 0
-                else:
-                    circularity = (4 * np.pi * area) / (perimeter ** 2)
+                    continue
+                circularity = (4 * np.pi * area) / (perimeter ** 2)
+                if circularity <= 0.12:
+                    continue
+                candidates.append((contour, circularity))
 
+            if candidates:
+                contour, circularity = max(candidates, key=lambda t: t[1])
                 M = cv.moments(contour)
-
-                
-                if M["m00"] != 0 and circularity > 0.12 and area > 110:
-                    cx = M["m10"] / M["m00"]
-                    cy = M["m01"] / M["m00"]
-                    c = np.array([cy, cx])
-                    blob_found = True
-                    # print("circularity", circularity)
-                    # print("center", c)
-                else:
-                    c = np.asarray(mask.shape) / 2.0
-                    blob_found = False
+                cx = M["m10"] / M["m00"]
+                cy = M["m01"] / M["m00"]
+                c = np.array([cy, cx])
+                blob_found = True
+            else:
+                c = np.asarray(mask.shape) / 2.0
+                blob_found = False
 
         if show_sub:
             cv.imshow("sub_{}".format(j), mask)

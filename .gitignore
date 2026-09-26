@@ -102,3 +102,10 @@ rl_sim/runs/
 rl_sim/models/
 rl_sim/*.png
 rl_sim/*.avi
+
+# RL hardware generated artifacts / runtime state
+rl_hw/pd_snapshots/
+rl_hw/calib_images/
+rl_hw/models/
+state_est/models_smoke/
+last_level_position.json

@@ -42,18 +42,36 @@ class Detector:
         Size of the corner subimage cropping window.
     """
 
+    # minSat lowered 2026-08-30: direct measurement of the actual corner marker
+    # pixels (8 consecutive live frames, the point of maximum saturation in the
+    # marker's expected region each time) showed saturation consistently in
+    # 83-119 -- every single sample fell short of the old minSat=125, which is
+    # exactly why that corner kept failing detection (not intermittent lighting
+    # noise, not a search-window/position problem -- a hard, reproducible
+    # threshold miss). 60 keeps clear margin below the observed range while still
+    # well above white paper/wood background saturation (background hue also
+    # falls outside 43-140 regardless, so this isn't relying on saturation alone).
     DEFAULT_HSV_CORNERS = (
         (43, 140),  # (minHue, maxHue)
-        (125, 255),  # (minSat, maxSat)
+        (60, 255),  # (minSat, maxSat)
         (9, 255),
     )  # (minVal, maxVal)
     DEFAULT_Q_CORNERS = 5  # gaussian detection param -> q-th quentile
     DEFAULT_TH_CORNERS = 0.002  # gaussian detection threshold
 
+    # Retuned 2026-08-26 against the current teal ball / camera / lighting. First pass
+    # (70,100)/(50,220)/(20,255) fixed the original near-total miss (old minSat=172
+    # excluded almost the whole ball) but left thin margin above detect_gaussian's
+    # hardcoded area>110 contour-area requirement (gaussian_robust.py) in dim/shadowed
+    # spots (e.g. against the wooden border), causing intermittent misses. Widened
+    # further after comparing contour area+circularity across both a well-lit sample
+    # (176->236px, circ 0.77->0.93) and a shadowed corner sample (138->169px, circ
+    # 0.68->0.85) -- both improve, and the frame's other blobs (corner markers/noise)
+    # still fail the area threshold (58-71px), so no new false-positive risk.
     DEFAULT_HSV_BALL = (
-        (89, 121),  # (minHue, maxHue)
-        (172, 255),  # (minSat, maxSat)
-        (21, 255),
+        (60, 115),  # (minHue, maxHue)
+        (35, 230),  # (minSat, maxSat)
+        (15, 255),
     )  # (minVal, maxVal)
     DEFAULT_Q_BALL = 6  # gaussian detection param -> q-th quentile
     DEFAULT_TH_BALL = 10 ** (-4)  # gaussian detection threshold
@@ -130,7 +148,7 @@ class Detector:
         corners = self.detect_corners(frame)
         # print("corners: ", corners)
         # print("detect ball")
-        ball = self.detect_ball(frame, show_rectangle=True)
+        ball = self.detect_ball(frame)
         # print("ball: ", ball)
         return corners, ball  # both in (x,y) conventions
 
@@ -296,31 +314,46 @@ class Detector:
             Detected corner coordinates of shape (4,2).
         """
         corners = np.zeros((4, 2), dtype="float32")
-
-        if self.corners is None or self.corners_missing:
-            (
-                cropped_corners_imgs,
-                subcoords_corners_imgs,
-            ) = self.get_default_subimages_corners(frame)
-        else:
-            (
-                cropped_corners_imgs,
-                subcoords_corners_imgs,
-            ) = self.predictive_cropping_corners(frame)
- 
-        # useful for debugging the corner detection             
-        # print("subcoords_corners_imgs: \n", subcoords_corners_imgs)
-        # print("subimgs shape: ", cropped_corners_imgs[0].shape)
         missing = False
-        for i, sub_im in enumerate(cropped_corners_imgs):
-            corners[i, :], found = self.detect_corner(
-                sub_im, i, subcoords_corners_imgs[i][0]
-            )
+        for i in range(4):
+            if self.corners is not None and not self.corners_missing:
+                center_pos = self.corners[i, :]
+            else:
+                ul = self.default_coords_subimages_corners[i, 0]
+                dr = self.default_coords_subimages_corners[i, 1]
+                center_pos = (ul + dr) / 2.0
+            corners[i, :], found = self._detect_corner_with_fallback(frame, i, center_pos)
             missing = missing or not found
         self.corners_missing = missing
         #print("found corners: \n", corners)
         self.corners = corners
         return corners
+
+    def _detect_corner_with_fallback(self, frame, i, center_pos):
+        """
+        Find corner i in an escalating series of windows around center_pos: the
+        normal small window first (fast, matches the old predictive/default crop
+        size), then progressively wider ones, finally the whole frame. The normal
+        window is only ~32px across -- if the plate has moved far enough since the
+        last read (a big intentional tilt, a leveling step) the true corner can end
+        up entirely outside it with nothing to fall back to, which is what repeated
+        "Unable to find corner" / "no contour found" failures throughout testing
+        actually were, not the corner being genuinely invisible. Costs nothing extra
+        in the common case (loop exits on the first successful, smallest window).
+        """
+        h, w = frame.shape[:2]
+        base = self.corner_subimage_half_size * 2
+        c, found = np.array([0.0, 0.0]), False
+        for scale in (1, 3, 8, None):  # None = whole frame
+            if scale is None:
+                sub_im, ul = frame, np.array([0, 0])
+            else:
+                size = base * scale
+                sub_im, ul, _ = self.get_cropped(frame, center_pos, size, size)
+            c, found = self.detect_corner(sub_im, i, ul)
+            if found:
+                return c, found
+        return c, found
 
     def detect_corner(self, sub_im: np.ndarray, i: int, coords_ul_sub_im: np.ndarray):
         """
@@ -349,13 +382,7 @@ class Detector:
         c = (coords_ul_sub_im + c_local).astype("float32")
         return c, found
 
-    def detect_ball(
-        self,
-        im: np.ndarray,
-        show_rectangle: bool = False,
-        mask_corner=False,
-        mask_initial=True,
-    ):
+    def detect_ball(self, im: np.ndarray):
         """
         Detects the ball in the given frame.
 
@@ -363,12 +390,6 @@ class Detector:
         -----------
         im : np.ndarray
             Input image.
-        show_rectangle : bool, optional
-            Whether to draw the bounding box around the detected ball.
-        mask_corner : bool, optional
-            Whether to mask detected corners.
-        mask_initial : bool, optional
-            Whether to mask the initial ball position.
 
         Returns:
         --------
@@ -376,60 +397,57 @@ class Detector:
             Detected ball coordinates or NaN if not found.
         """
 
-        if self.is_ball_found:
-            if mask_corner:
-                corner_ball = self.is_ball_in_corner()
-                if (
-                    corner_ball is not None
-                ):  # masking the corner that is in vicinity of the ball
-                    cv2.circle(
-                        im,
-                        tuple(self.corners[corner_ball, :].astype(int)[::-1]),
-                        10,
-                        (0, 0, 255),
-                        -1,
-                    )
-            cropped_ball_im, coords_ul_cropped_img = self.predictive_cropping_ball(
-                im, draw=show_rectangle
-            )
-        else:
-            # if self.ball_pos is not None:
-            print("\n\n\nBALL NOT FOUND\n\n\n")
-            if mask_initial:
-                for i in range(4):
-                    cv2.circle(
-                        im,
-                        tuple(np.round(self.corners[i, :]).astype(int)[::-1]),
-                        10,
-                        (0, 0, 255),
-                        -1,
-                    )
-                    cv2.circle(
-                        im,
-                        tuple(np.round(self.fixed_corners[i, :]).astype(int)[::-1]),
-                        10,
-                        (0, 0, 255),
-                        -1,
-                    )
-
-            ul, dr = self.default_coords_subimage_ball
-            cropped_ball_im, coords_ul_cropped_img = (
-                im[ul[0] : dr[0], ul[1] : dr[1], :],
-                ul,
-            )
-        sub_masked, mask = mask_hsv(cropped_ball_im, self.hsv_params_ball)
-        # print("ball")
-        c_local, self.is_ball_found = detect_gaussian(
-            mask, 4, self.q_ball, self.th_ball, show_sub=self.show_subimages
-        )
+        # Masking out the corner markers (drawing filled circles over them) used to
+        # run before every ball search, to stop it from mistaking a static marker
+        # for the ball. That's now redundant -- corner blobs measured at ~20-60px,
+        # well under MIN_BALL_AREA (110) in _detect_ball_with_fallback's area filter,
+        # so they can't pass as a ball match regardless. Worse, it was actively
+        # harmful: confirmed directly, a ball sitting right next to a corner marker
+        # had its own genuine pixels erased by this same radius-10 fill (comparable
+        # in size to the ball's ~15px radius), shrinking its contour below threshold
+        # on every single read for as long as it stayed near that corner.
         if not self.is_ball_found:
+            print("\n\n\nBALL NOT FOUND\n\n\n")
+        if self.ball_pos is not None:
+            search_center = self.ball_pos
+        else:
+            ul, dr = self.default_coords_subimage_ball
+            search_center = (np.asarray(ul) + np.asarray(dr)) / 2.0
+
+        c, found = self._detect_ball_with_fallback(im, search_center)
+        self.is_ball_found = found
+        if not found:
             return np.array([np.nan, np.nan])
 
-        # print(c_local)
-        c = (coords_ul_cropped_img + c_local).astype("float32")  # (x,y)
         self.ball_pos = c
         print("ball pos [end of detect_ball]: ", self.ball_pos)
         return c
+
+    def _detect_ball_with_fallback(self, frame, center_pos):
+        """
+        Same idea as _detect_corner_with_fallback: try the normal small predictive
+        window first (fast, matches the ball's usual jitter between frames), then
+        escalate to progressively wider windows and finally the whole frame if the
+        ball isn't where expected. Without this, a ball that moved further than the
+        window's radius in one frame (a fast roll, or reacquiring after being lost)
+        was simply unfindable regardless of how visible it actually was.
+        """
+        h, w = frame.shape[:2]
+        base = Detector.DEFAULT_SIZE_CROP_BALL
+        c, found = np.array([0.0, 0.0]), False
+        for scale in (1, 3, 8, None):  # None = whole frame
+            if scale is None:
+                sub_im, ul = frame, np.array([0, 0])
+            else:
+                size = base * scale
+                sub_im, ul, _ = self.get_cropped(frame, center_pos, size, size)
+            sub_masked, mask = mask_hsv(sub_im, self.hsv_params_ball)
+            c_local, found = detect_gaussian(
+                mask, 4, self.q_ball, self.th_ball, show_sub=self.show_subimages
+            )
+            if found:
+                return (ul + c_local).astype("float32"), True
+        return c, False
 
     def draw_corners(self, frame: np.ndarray):
         for i in range(self.corners.shape[0]):
@@ -478,10 +496,15 @@ class DetectorFixedPts(Detector):
         Custom HSV parameters for fixed-point detection.
     """
     def __init__(self, markers, show_subimages: bool = False):
+        # minSat/minVal lowered 2026-08-30 for the same reason as
+        # Detector.DEFAULT_HSV_CORNERS -- direct measurement of live frames showed
+        # this marker's actual saturation (83-119) and value (34-63) both dipping
+        # below the old minSat=125/minVal=40, a reproducible threshold miss, not
+        # noise.
         hsv_corners = (
             (43, 140),  # (minHue, maxHue)
-            (125, 255),  # (minSat, maxSat)
-            (40, 255),  # (minVal, maxVal)
+            (60, 255),  # (minSat, maxSat)
+            (20, 255),  # (minVal, maxVal)
         )
         super().__init__(
             markers,
