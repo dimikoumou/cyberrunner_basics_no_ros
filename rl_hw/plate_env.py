@@ -1,0 +1,988 @@
+"""
+rl_hw/plate_env.py
+
+Gymnasium environment that trains a goal-conditioned ball-balancing policy directly
+against the real CyberRunner hardware (camera + two Dynamixel motors), with the maze
+insert swapped for a flat glass plate. No simulator involved -- this talks to the
+camera and motors every step. See rl_sim/maze_env.py for the earlier sim-only
+prototype whose observation convention this mirrors.
+
+Prerequisite: state_est/markers.csv must hold the corner-marker calibration for the
+current physical setup (recalibrate it if the camera/markers moved since the maze was
+last used -- see state_est/camera_calibration_realtime.py / board_detection.py).
+"""
+import os
+import sys
+import glob
+import json
+import time
+
+import numpy as np
+import cv2
+import gymnasium as gym
+from gymnasium import spaces
+
+# estimation_pipeline.py and its sibling modules use flat imports (`from measurements
+# import Measurements`, etc.) and load markers.csv / calib_razer_data.txt relative to
+# the working directory -- so both the path and the cwd need to point at state_est/.
+STATE_EST_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "state_est"))
+sys.path.insert(0, STATE_EST_DIR)
+os.chdir(STATE_EST_DIR)
+
+from estimation_pipeline import EstimationPipeline  # noqa: E402
+from divers import init_capture  # noqa: E402
+import state_est_control  # noqa: E402
+from state_est_control import init_dynamixel, set_position, ADDR_TORQUE_ENABLE  # noqa: E402
+
+# state_est_control.DXL_IDS = [1, 2] is wrong for tilt control: confirmed 2026-08-26
+# that ID 2 is the unrelated ball-reload elevator motor (it never moved the plate --
+# present-position readback was frozen regardless of command -- while the actual
+# second tilt axis is ID 3, confirmed via a real alpha/beta response). Override here
+# rather than editing state_est_control.py.
+DXL_IDS = [1, 3]
+
+
+def _resolve_dynamixel_port():
+    """state_est_control.DXL_PORT is a hardcoded device name tied to one specific
+    USB-serial adapter's enumerated suffix (e.g. /dev/tty.usbserial-FT79212K) -- this
+    breaks any time the OS assigns a different suffix (different cable, different USB
+    port, different machine). Auto-detect the live port instead of trusting it."""
+    if os.path.exists(state_est_control.DXL_PORT):
+        return state_est_control.DXL_PORT
+    candidates = sorted(glob.glob("/dev/tty.usbserial-*"))
+    if not candidates:
+        raise RuntimeError(
+            "No /dev/tty.usbserial-* device found -- is the U2D2 plugged in and powered? "
+            f"(hardcoded fallback {state_est_control.DXL_PORT!r} also not present)"
+        )
+    if len(candidates) > 1:
+        print(f"[HardwarePlateEnv] warning: multiple usbserial devices found {candidates}, using {candidates[0]}")
+    return candidates[0]
+
+CALIBRATION_PATH = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "motor_calibration.json")
+)
+# _level_plate() always started its search from this static file's center every
+# single call -- fine when the true level point drifts a little, but observed
+# directly over a long session to swing across nearly the ENTIRE +-1000-tick search
+# range between separate calls (needing the search to hit first one bound, then the
+# opposite bound, on consecutive runs). Restarting from a known-stale reference every
+# time means paying that full, slow, unreliable search on every single call. Persist
+# whatever position last actually converged and start from there instead -- usually
+# already close, so most calls converge in a couple of quick iterations.
+LAST_LEVEL_CACHE_PATH = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "last_level_position.json")
+)
+
+GOAL_MARGIN = 0.04          # meters, inward margin from the plate's usable extent
+GOAL_TOLERANCE = 0.015      # meters, radius of the "balance here" circle
+IN_CIRCLE_BONUS = 1.0       # per-step reward bonus while the ball is inside that circle
+LOST_BALL_PENALTY = -1.0
+BALL_LOST_GRACE_FRAMES = 3  # consecutive not-found frames tolerated before terminating
+# A ball wedged against the plate's physical edge/frame reads as ball_found=True the
+# whole time (it's visible, just not moving) -- BALL_LOST_GRACE_FRAMES never catches
+# this. Observed directly: a ball at the edge stayed frozen to the 4th decimal place
+# across 150 steps of a real, meaningful, constant tilt command. Detect it instead by
+# watching for "commanding real tilt but the ball isn't responding at all".
+STUCK_CHECK_WINDOW = 25          # steps of history to check
+STUCK_MOVEMENT_THRESHOLD = 0.004  # meters of total range below which it's "not moving"
+STUCK_ACTION_THRESHOLD = 0.15     # mean |action| above which it's "being meaningfully driven"
+
+ADDR_CURRENT_LIMIT = 38  # X-series, 2 bytes
+CURRENT_LIMIT = 1193     # verified real max for this motor model -- 1800 is rejected as out-of-range
+ADDR_POSITION_I_GAIN = 82  # X-series, 2 bytes, RAM (writable with torque enabled)
+POSITION_I_GAIN = 150
+# Read directly off the servos: both motor1 and motor3 have P=400 I=0 D=400 -- I=0
+# means a Position-Control servo has NO way to fully cancel a steady external load
+# (gravity pulling the tilted plate back through the linkage); it settles at a
+# droop proportional to that load instead of reaching the exact commanded tick.
+# Confirmed directly: holding motor1 at a fixed target under a fixed load left it
+# 46-92 ticks short with I=0, using close to zero current (not even trying hard),
+# and the gap grew with distance from center (more load -> more droop) -- textbook
+# P/D-only steady-state error, not a mechanical stall. The SAME symptom (a servo
+# that appears to peg against the search bounds without reaching true alpha/beta=0)
+# was misread earlier as motor3's real physical range being exhausted. With I=150,
+# the same test closed to a 2-6 tick gap. This is very likely the real cause of
+# most of this session's leveling/holding difficulty, not exhausted physical range.
+
+
+def _load_motor_calibration(path):
+    """motor_calibration.json holds empirically-probed safe min/center/max per motor
+    (present-position stall detection -- see the "_note" field in the file itself for
+    the 2026-08-26 correction: motor2_id is 3, not 2, since ID 2 turned out to be the
+    unrelated ball-reload elevator motor). Still clamps to a SYMMETRIC usable range
+    around center (using the smaller of the two half-ranges) as a defensive backstop
+    in case the file's min/max aren't already symmetric -- equal action magnitude
+    should produce comparable physical response in both directions, or the
+    action->effect mapping becomes much harder to learn from."""
+    with open(path) as f:
+        cal = json.load(f)
+    result = {}
+    for name in ("motor1", "motor2"):
+        motor_id = cal[f"{name}_id"]
+        min_pos, center_pos, max_pos = cal[f"{name}_min_position"], cal[f"{name}_center_position"], cal[f"{name}_max_position"]
+        half_range = min(center_pos - min_pos, max_pos - center_pos)
+        if half_range < (center_pos - min_pos) or half_range < (max_pos - center_pos):
+            print(f"[HardwarePlateEnv] {name}: clamping to a symmetric +-{half_range} ticks around "
+                  f"center={center_pos} (raw calibration was -{center_pos - min_pos}/+{max_pos - center_pos})")
+        result[motor_id] = (center_pos - half_range, center_pos, center_pos + half_range)
+    return result
+
+
+def map_action_to_position(a, min_pos, center_pos, max_pos):
+    """Piecewise-linear map: a in [-1,0] -> [min_pos, center_pos], a in [0,1] -> [center_pos, max_pos]."""
+    a = float(np.clip(a, -1.0, 1.0))
+    if a < 0:
+        pos = center_pos + a * (center_pos - min_pos)
+    else:
+        pos = center_pos + a * (max_pos - center_pos)
+    return int(round(pos))
+
+
+class HardwarePlateEnv(gym.Env):
+    """Goal-conditioned ball-on-plate env, driven directly by the real camera + motors.
+
+    Observation (8,): [x_b, y_b, vx_b, vy_b, alpha, beta, goal_x - x_b, goal_y - y_b]
+    Action (2,):       [a1, a2] in [-1, 1], mapped through each motor's calibrated
+                        (min, center, max) position from motor_calibration.json.
+    """
+
+    metadata = {"render_modes": []}
+
+    def __init__(
+        self,
+        control_hz=55,
+        goal_tolerance=GOAL_TOLERANCE,
+        goal_margin=GOAL_MARGIN,
+        max_episode_steps=600,
+        camera_index=0,
+        show_image=False,
+        fixed_goal=None,
+        max_action_delta=0.35,
+    ):
+        """
+        fixed_goal: None keeps the original behavior (a new random goal every
+            episode -- the policy learns to go anywhere it's told). Pass "center" or
+            an explicit (x, y) in meters to instead train/hold a single fixed target
+            every episode -- simpler task, useful as a first "does this even work"
+            validation before goal-conditioned training.
+        max_action_delta: caps how much the ACTUAL commanded action can change from
+            the previous step, regardless of what's requested. SAC's pre-learning_starts
+            random phase samples a fresh independent action every step, which without
+            this would slam the plate between opposite extremes every ~18ms -- hard on
+            the hardware and low-value training data. The agent still sees/learns over
+            the full [-1,1] action space; this only rate-limits actuation.
+        """
+        super().__init__()
+        self.control_hz = control_hz
+        self.dt = 1.0 / control_hz
+        self.goal_tolerance = goal_tolerance
+        self.goal_margin = goal_margin
+        self.max_episode_steps = max_episode_steps
+        self.fixed_goal = fixed_goal
+        self.max_action_delta = max_action_delta
+        self._last_commanded_action = np.zeros(2, dtype=np.float32)
+        self._pos_history = []
+        self._action_history = []
+
+        self.calibration = _load_motor_calibration(CALIBRATION_PATH)
+        # Overwritten every _level_plate() call with the position that leveling
+        # actually achieved -- see the comment in _write_action() for why this
+        # matters: mapping action=0 through the STATIC calibration center instead
+        # of the just-achieved level position was a real, severe bug.
+        self._effective_calibration = dict(self.calibration)
+
+        self.pipeline = EstimationPipeline(
+            fps=control_hz,
+            estimator="FiniteDiff",
+            FiniteDiff_mean_steps=4,  # 0 produces NaN velocities out of the estimator
+            print_measurements=False,
+            show_image=show_image,
+        )
+        self._exp_h = int(self.pipeline.measurements.plate_pose.o.height)
+        self._exp_w = int(self.pipeline.measurements.plate_pose.o.width)
+        # The ball's own (xb, yb) is measured in the plate's MODEL_POINTS_CORNERS
+        # frame (plate_pose.py), which is CENTERED AT (0,0) -- half-extents are
+        # C2C_X/2, C2C_Y/2, not [0, L_EXT_INT_X/Y] (that pair is used for a
+        # different purpose: create_mask's outer valid-pixel-region check). Using
+        # L_EXT_INT_X/Y here previously placed "center" and every randomly sampled
+        # goal outside the ball's actual reachable area entirely.
+        self._x_half = float(self.pipeline.measurements.plate_pose.C2C_X) / 2
+        self._y_half = float(self.pipeline.measurements.plate_pose.C2C_Y) / 2
+
+        self.cap, _, _ = init_capture("CAM", camera_index, None, None)
+        if self.cap is None or not self.cap.isOpened():
+            raise RuntimeError("HardwarePlateEnv: could not open the camera")
+        self._lock_camera_exposure()
+
+        state_est_control.DXL_PORT = _resolve_dynamixel_port()
+        self.port_handler, self.packet_handler = init_dynamixel()
+        if self.port_handler is None:
+            raise RuntimeError("HardwarePlateEnv: could not open the Dynamixel port")
+        # Current limit was never explicitly set anywhere in this codebase's history --
+        # motors were running on whatever default happened to be in EEPROM (600/800),
+        # far below what this mechanism's friction needs. 1193 is the real verified max
+        # for this motor model (1800, used in an old calibration script, is invalid and
+        # was silently rejected there too). Must be written while torque is disabled.
+        for dxl_id in DXL_IDS:
+            self.packet_handler.write2ByteTxRx(self.port_handler, dxl_id, ADDR_CURRENT_LIMIT, CURRENT_LIMIT)
+        for dxl_id in DXL_IDS:
+            self.packet_handler.write1ByteTxRx(self.port_handler, dxl_id, ADDR_TORQUE_ENABLE, 1)
+        self._motors_torqued = True
+        # Position I Gain is RAM (writable with torque already enabled) -- must be
+        # written AFTER torque-enable above, or it has no chance to take effect
+        # before the very first set_position() call a few lines down.
+        for dxl_id in DXL_IDS:
+            self.packet_handler.write2ByteTxRx(self.port_handler, dxl_id, ADDR_POSITION_I_GAIN, POSITION_I_GAIN)
+
+        # Drive to the calibrated (level) center BEFORE priming the camera's world-frame
+        # reference. Previously this ran before torque was even enabled, so the plate was
+        # unpowered and sagging to gravity's whim (wherever the last process left it right
+        # before disabling torque on close) -- an uncontrolled tilt during the one-shot
+        # reference-corner calibration. That's not just cosmetic: it plausibly explains the
+        # multi-degree, run-to-run bias in reported beta seen throughout calibration testing
+        # (each run baked in a different incidental resting tilt), and on at least one run
+        # left the plate tilted enough to fully occlude a fixed reference corner from the
+        # camera, crashing this method outright. Calibrating from a known, controlled,
+        # already-torqued position removes that variable.
+        for dxl_id, target in zip(self.calibration.keys(), (c for _, c, _ in self.calibration.values())):
+            set_position(self.port_handler, self.packet_handler, dxl_id, target)
+        time.sleep(1.5)
+
+        self._prime_camera_localization()
+
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(8,), dtype=np.float32)
+        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
+
+        self.goal = np.zeros(2, dtype=np.float32)
+        self._prev_ball = np.zeros(2, dtype=np.float32)
+        self._last_plausible_tilt = (0.0, 0.0)
+        self._bad_tilt_streak = 0
+        self._step_count = 0
+        self._lost_count = 0
+        self._closed = False
+
+    def _lock_camera_exposure(self, settle_s=2.0):
+        """
+        divers.py's init_capture() never touches exposure/white-balance -- the
+        camera runs on whatever auto-exposure/auto-WB the driver picks, continuously
+        re-adjusting. That's a real, likely root cause behind corner/marker
+        detection intermittently failing: direct inspection showed the tiny corner
+        markers sitting right at the edge of their HSV threshold (max contour area
+        ~21px, several times smaller than a comfortable margin) -- exactly what
+        you'd expect if brightness/gain keeps drifting frame to frame instead of
+        holding still. Let auto-exposure converge for a couple seconds (as before),
+        then switch to manual mode AT WHATEVER VALUES it converged to -- freezing
+        a good, lighting-appropriate exposure instead of guessing a fixed one, and
+        stopping it from continuing to hunt during actual detection.
+        """
+        t0 = time.time()
+        while time.time() - t0 < settle_s:
+            self._grab_frame()
+        exposure = self.cap.get(cv2.CAP_PROP_EXPOSURE)
+        gain = self.cap.get(cv2.CAP_PROP_GAIN)
+        wb = self.cap.get(cv2.CAP_PROP_WB_TEMPERATURE)
+        # CAP_PROP_AUTO_EXPOSURE's manual-mode value is backend-dependent (0.25 on
+        # some V4L2 builds, 1 on others/AVFoundation) -- try the common ones and
+        # verify by readback rather than assuming one is correct for this backend.
+        locked = False
+        for manual_value in (0.25, 1, 0):
+            self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, manual_value)
+            self.cap.set(cv2.CAP_PROP_EXPOSURE, exposure)
+            if abs(self.cap.get(cv2.CAP_PROP_AUTO_EXPOSURE) - manual_value) < 1e-3:
+                locked = True
+                break
+        self.cap.set(cv2.CAP_PROP_AUTO_WB, 0)
+        if wb > 0:
+            self.cap.set(cv2.CAP_PROP_WB_TEMPERATURE, wb)
+        if not locked:
+            print("[HardwarePlateEnv] warning: could not confirm manual-exposure lock on this "
+                  "camera backend -- auto-exposure may still be adjusting during detection")
+        else:
+            print(f"[HardwarePlateEnv] locked exposure={exposure} gain={gain} wb={wb}")
+
+    def _prime_camera_localization(self, n_frames=40):
+        """
+        Measurements.camera_localization() (state_est/measurements.py) runs exactly
+        once per pipeline instance, off a single captured frame, with no averaging --
+        it uses that one frame's detection of the physically-static reference corners
+        to fix the camera's world-frame pose for the rest of the process's lifetime.
+        A single noisy corner detection there bakes in a persistent angular bias for
+        the whole run. Confirmed by direct test: two separate HardwarePlateEnv
+        instances, at the identical commanded motor positions, reported beta values
+        differing by several degrees (-0.10 vs -4.24) purely because each one's
+        one-shot calibration frame was independently noisy -- not a hardware issue,
+        not a sign bug, not a motor problem.
+
+        A plain mean over 15 frames (the original fix) was NOT enough: separate
+        process launches this session, at nominally-identical plate positions,
+        still swung by ~20 degrees in reported beta (e.g. +10.78 vs -5 to -9), and
+        twice showed a hard corner-detection failure ("Unable to find corner 1/4")
+        that still passed the >=n_frames//2 threshold and got silently averaged in
+        alongside good frames. Outliers, not just noise, were getting into the mean.
+        Fix: take more frames, then use the per-frame MEDIAN corner position (robust
+        to occasional bad detections in a way a mean isn't), and separately verify
+        no individual frame's corner positions strayed far from that median before
+        trusting the result -- surfacing a real problem instead of quietly averaging
+        over it.
+        """
+        # Let auto-exposure/auto-white-balance settle after a fresh camera open --
+        # a cold-started camera's first frames can differ enough in brightness/gain
+        # to shift the reference corners' detected sub-pixel position between runs,
+        # which this axis's geometry is disproportionately sensitive to.
+        t0 = time.time()
+        while time.time() - t0 < 2.0:
+            self._grab_frame()
+
+        measurements = self.pipeline.measurements
+        # Outlier-rejection on the 4 corner POINTS doesn't catch every failure mode:
+        # confirmed directly that a bad detection can be wrong in a way that's
+        # internally self-consistent across many frames (all agreeing on the same
+        # wrong spot), which looks exactly like a confident inlier cluster to a
+        # per-frame deviation check. The one thing that's independently checkable
+        # is the RESULT: this camera is bolted down looking at a roughly-overhead,
+        # roughly-fixed view of the plate, so a correct calibration should always
+        # produce close to the SAME rotation matrix run to run -- confirmed
+        # empirically across every known-good run this session (diagonal close to
+        # (+1,-1,-1), small off-diagonal terms). A calibration whose result doesn't
+        # look like that is almost certainly wrong regardless of how "confident"
+        # the point detections were, so re-run the whole capture instead of
+        # trusting it.
+        MAX_LOCALIZATION_ATTEMPTS = 4
+        frame = None
+        for attempt in range(1, MAX_LOCALIZATION_ATTEMPTS + 1):
+            detected = []
+            for _ in range(n_frames):
+                frame = self._grab_frame()
+                if frame is None:
+                    continue
+                pts = measurements.detector_fixed_points.detect_corners(frame)
+                if measurements.detector_fixed_points.corners_missing:
+                    continue
+                detected.append(pts)
+            if len(detected) < max(3, n_frames // 2):
+                print(f"[HardwarePlateEnv] priming attempt {attempt}: only got "
+                      f"{len(detected)}/{n_frames} good reference-corner detections -- retrying")
+                continue
+            stacked = np.stack(detected, axis=0)  # (n_detected, 4 corners, 2)
+            median_pts = np.median(stacked, axis=0)
+            per_frame_max_dev = np.max(np.linalg.norm(stacked - median_pts[None], axis=2), axis=1)
+            OUTLIER_PX = 3.0
+            inliers = stacked[per_frame_max_dev <= OUTLIER_PX]
+            n_outliers = len(stacked) - len(inliers)
+            if n_outliers:
+                print(f"[HardwarePlateEnv] priming attempt {attempt}: dropped {n_outliers}/"
+                      f"{len(stacked)} outlier reference-corner detections (>{OUTLIER_PX}px "
+                      f"from the cross-frame median)")
+            if len(inliers) < max(3, n_frames // 4):
+                print(f"[HardwarePlateEnv] priming attempt {attempt}: only {len(inliers)}/"
+                      f"{len(stacked)} detections agreed with each other -- retrying")
+                continue
+            avg_pts = np.mean(inliers, axis=0)
+            measurements.detector.fixed_corners = avg_pts
+            measurements.plate_pose.camera_localization(avg_pts)
+            R = measurements.plate_pose.T__W_C[:3, :3]
+            plausible = R[0, 0] > 0.9 and R[1, 1] < -0.9 and R[2, 2] < -0.9
+            if plausible:
+                measurements.create_mask(frame)
+                return
+            print(f"[HardwarePlateEnv] priming attempt {attempt}: resulting camera pose looks "
+                  f"physically implausible (rotation diagonal {np.diag(R)}, expected roughly "
+                  f"(+1,-1,-1)) -- retrying")
+        raise RuntimeError(
+            f"HardwarePlateEnv: could not get a physically plausible camera calibration in "
+            f"{MAX_LOCALIZATION_ATTEMPTS} attempts -- check the camera/lighting/markers"
+        )
+
+    # ---- hardware I/O ----------------------------------------------------
+
+    def _grab_frame(self):
+        ok, frame = self.cap.read()
+        if not ok or frame is None:
+            return None
+        if frame.shape[:2] != (self._exp_h, self._exp_w):
+            frame = cv2.resize(frame, (self._exp_w, self._exp_h))
+        return frame
+
+    def _read_state(self):
+        """Returns (xb, yb, alpha, beta, ball_found)."""
+        frame = self._grab_frame()
+        if frame is None:
+            return np.nan, np.nan, 0.0, 0.0, False
+        try:
+            _, _, inputs, xb, yb = self.pipeline.estimate(frame)
+        except Exception as e:
+            print(f"[HardwarePlateEnv] estimate() failed on this frame, skipping: {e}")
+            return np.nan, np.nan, 0.0, 0.0, False
+        alpha, beta = inputs
+        ball_found = not (np.isnan(xb) or np.isnan(yb))
+        # Defense in depth: a mis-detected blob (e.g. a large false-positive region
+        # under bad lighting getting through the ball detector) can still produce a
+        # numeric, non-NaN position -- just a physically impossible one. Observed
+        # directly: xb/yb of +-0.5+ meters when the plate's actual half-extents are
+        # ~0.14/0.12m. Treat anything meaningfully outside the plate as not-found
+        # rather than trusting it into the reward/goal-distance calculation.
+        if ball_found and (abs(xb) > self._x_half * 1.5 or abs(yb) > self._y_half * 1.5):
+            print(f"[HardwarePlateEnv] rejecting physically implausible ball position "
+                  f"({xb:.3f}, {yb:.3f}) -- treating as not found")
+            return np.nan, np.nan, alpha, beta, False
+        # Same defense-in-depth idea, for plate tilt: a violent shake can throw the
+        # continuous reference-corner TRACKING (not the one-shot priming -- this can
+        # happen mid-run, well after that) onto the wrong nearby blob, which then
+        # self-confirms frame to frame since tracking searches near its own last
+        # answer. Observed directly: alpha/beta suddenly reading +53/-46 degrees --
+        # far outside every real, direct-probed achievable range this session
+        # (worst case ~+-20deg) -- which then fed a leveling hill-climb chasing a
+        # target that was never real. Clamp to the last known-plausible reading
+        # instead of trusting an outlier this far outside physical possibility.
+        MAX_PLAUSIBLE_TILT_DEG = 30.0
+        alpha_deg, beta_deg = np.degrees(alpha), np.degrees(beta)
+        if abs(alpha_deg) > MAX_PLAUSIBLE_TILT_DEG or abs(beta_deg) > MAX_PLAUSIBLE_TILT_DEG:
+            self._bad_tilt_streak += 1
+            print(f"[HardwarePlateEnv] rejecting physically implausible tilt reading "
+                  f"(alpha={alpha_deg:+.1f} beta={beta_deg:+.1f}) -- likely lost reference-corner "
+                  f"tracking, using last known-plausible tilt instead")
+            # Clamping the READING doesn't fix the cause: the general Detector's
+            # corner tracking (self.pipeline.measurements.detector, used every
+            # frame for alpha/beta -- separate from the one-shot priming detector)
+            # searches near ITS OWN last remembered corner positions, so once a
+            # shake throws it onto the wrong blob it keeps re-finding that same
+            # wrong blob forever and never recovers on its own. After a couple of
+            # consecutive bad readings, force it to forget and re-search from the
+            # default positions instead of the bad memory.
+            if self._bad_tilt_streak >= 2:
+                print("[HardwarePlateEnv] repeated bad tilt readings -- resetting corner "
+                      "tracker to force re-acquisition from default search positions")
+                self.pipeline.measurements.detector.corners = None
+                self._bad_tilt_streak = 0
+            alpha, beta = self._last_plausible_tilt
+        else:
+            self._bad_tilt_streak = 0
+            self._last_plausible_tilt = (alpha, beta)
+        return xb, yb, alpha, beta, ball_found
+
+    def _write_action(self, action):
+        # action[1] (motor3/beta) is inverted relative to yb -- confirmed directly:
+        # commanding a sustained action=(0,+1.0) moved yb from -0.111 to -0.123, the
+        # OPPOSITE of what +1.0 should mean (push toward +yb). Every "correct toward
+        # center" push on this axis in every script this session was silently
+        # reinforcing whatever corner the ball was already heading into instead of
+        # opposing it. Flipping the sign here, once, means every caller's action[1]
+        # now means what it says (positive -> pushes yb positive) without having to
+        # remember this quirk in each script.
+        action = np.array([action[0], -action[1]], dtype=np.float32)
+        # Map through _effective_calibration (refreshed every _level_plate() call to
+        # center on whatever position leveling actually achieved), NOT the static
+        # self.calibration -- confirmed by direct measurement that mapping through
+        # the static center=3500 for motor3 was a severe, previously-undiagnosed bug:
+        # _level_plate() converges motor3 to ~4046-4050 (as close to beta=0 as this
+        # axis's real travel allows -- see its own docstring on the hysteresis), but
+        # action=0.0 through the OLD static mapping commanded position 3500 -- 546
+        # ticks below the just-achieved level point, i.e. a big NEGATIVE-beta shove.
+        # Only action=+1.0 exactly happened to land near level (3500+1*(4050-3500)=
+        # 4050). Every non-extreme action was silently fighting the controller's own
+        # goal on this axis, which explains why the ball could never be recovered
+        # from a -y corner even under a nominally "correct toward +y" action.
+        for motor_id, a in zip(self._effective_calibration.keys(), action):
+            min_pos, center_pos, max_pos = self._effective_calibration[motor_id]
+            pos = map_action_to_position(a, min_pos, center_pos, max_pos)
+            set_position(self.port_handler, self.packet_handler, motor_id, pos)
+
+    def _recenter_motors(self):
+        for motor_id, (_, center_pos, _) in self.calibration.items():
+            set_position(self.port_handler, self.packet_handler, motor_id, center_pos)
+
+    def _level_plate(self, tolerance_deg=0.5, max_iters=20, max_step=150, settle_s=0.8, quick=False):
+        """Closed-loop leveling against live camera feedback, run at the start of
+        every episode. A single calibrated 'center' tick value turned out NOT to be
+        trustworthy on its own: identical commanded ticks for motor3's axis were
+        directly observed giving beta readings anywhere from -0.5deg to -4.7deg
+        across separate tests, with no code or calibration change in between --
+        real path/history-dependent hysteresis on that axis, not measurement noise
+        or a calibration bug. Starting from the calibrated center as a reasonable
+        initial guess and then correcting against a live reading makes each episode
+        self-correcting instead of trusting that guess to still be right.
+
+        quick=True skips the iterative search and just drives straight to the
+        cached last-good position -- used right after _attempt_unstick() frees the
+        ball. The full search actively explores several DIFFERENT tilt postures
+        before settling (each held ~settle_s), and confirmed directly: that
+        exploration trends toward the same extreme that traps the ball at a given
+        corner, so running the full multi-second search right after freeing it
+        can tilt it straight back before real step()-level PD control ever
+        resumes. A quick, non-exploratory settle avoids re-baiting the trap it
+        was just pulled out of; the next real reset() still does a full search."""
+        m1_id, m3_id = sorted(self.calibration.keys())
+        _, m1p, _ = self.calibration[m1_id]
+        _, m3p, _ = self.calibration[m3_id]
+        try:
+            with open(LAST_LEVEL_CACHE_PATH) as f:
+                cached = json.load(f)
+            m1p, m3p = int(cached["m1"]), int(cached["m3"])
+        except (FileNotFoundError, KeyError, ValueError, json.JSONDecodeError):
+            pass
+        # These bounds were stale artifacts of a real bug, not the true safe range:
+        # both servos had Position I Gain=0 (see POSITION_I_GAIN above), so under the
+        # plate's gravity load they settled short of whatever was commanded, and the
+        # hill-climb below misread that droop as "hit a real wall" and pegged here
+        # permanently, every single call, without ever reaching alpha/beta=0. With
+        # I gain now fixed, direct probing (present-position readback under real load,
+        # not just a camera reading) confirmed clean, non-stalling tracking well past
+        # these old numbers: motor1 up to at least 3084 (alpha still dropping linearly,
+        # no gap growth), motor3 up to at least 4090 (beta still responding, gap <=4
+        # ticks). Widened accordingly, with a margin kept back from the tested ceiling.
+        # motor3/id3 got a Homing Offset of -1024 written to its EEPROM (see the
+        # "_note" in motor_calibration.json) specifically because its real level
+        # point kept converging right at the single-turn firmware ceiling (4095),
+        # leaving ~5 ticks of headroom on one side regardless of tuning. Every
+        # absolute tick number for motor3 below is shifted by that same -1024 to
+        # stay physically consistent with the new numbering.
+        #
+        # m3_max initially got the same naive shift (4090-1024=3066), which was a
+        # real bug: that just relabels the OLD ceiling, throwing away the entire
+        # point of the offset. Direct probing post-offset (present-position
+        # readback under load, not just a camera reading) confirmed clean,
+        # non-stalling tracking with ~0 gap all the way from 3066 up to 4090 --
+        # over 1000 ticks of real, previously-inaccessible range now open. 4090
+        # keeps a small margin below the true firmware ceiling (4095, confirmed:
+        # commanding past it clamps to 4095 and gap grows for real).
+        # m1_max=3200 was itself a premature ceiling, same class of issue as m3's:
+        # direct probing (present-position readback under load, generous settle
+        # time) showed clean, non-stalling tracking all the way to the firmware
+        # ceiling (4095). Unlike m3, alpha's RESPONSE genuinely plateaus around
+        # -11deg starting near m1~3350-3600 (a real kinematic saturation of this
+        # axis's tilt authority, confirmed by it holding flat across 800+ further
+        # ticks of clean travel, not a numbering artifact) -- so there's no benefit
+        # pushing all the way to 4095. But 3200 was stopping WELL BEFORE that
+        # plateau even starts (alpha was still only -4.45deg there, not the -11deg
+        # this axis can actually reach), so real, previously-inaccessible tilt
+        # authority was being left unused. 3700 comfortably covers the plateau.
+        m1_min, m1_max = 2374, 3700
+        m3_min, m3_max = 1926, 4090
+        m1p = int(np.clip(m1p, m1_min, m1_max))
+        m3p = int(np.clip(m3p, m3_min, m3_max))
+
+        set_position(self.port_handler, self.packet_handler, m1_id, m1p)
+        set_position(self.port_handler, self.packet_handler, m3_id, m3p)
+        time.sleep(settle_s * 2)
+
+        if quick:
+            self._effective_calibration[m1_id] = (m1_min, m1p, m1_max)
+            self._effective_calibration[m3_id] = (m3_min, m3p, m3_max)
+            return
+
+        _, _, alpha, beta, _ = self._read_state()
+        a, b = np.degrees(alpha), np.degrees(beta)
+        # Fixed step size in the KNOWN direction, halved on overshoot -- not a secant/
+        # slope estimate. The slope magnitude is unreliable under this axis's hysteresis
+        # (a bad estimate on one iteration can send a proportional controller badly off
+        # course, confirmed: alpha/beta ended up worse, not better, across repeated
+        # trials). The DIRECTION has been 100% consistent all session regardless of
+        # hysteresis: increasing motor1 always decreases alpha, increasing motor3
+        # always increases beta. Hill-climb with that fixed direction and a shrinking
+        # step is slower per-step but can't diverge the way a bad slope estimate can.
+        step1 = step3 = max_step
+
+        for _ in range(max_iters):
+            if abs(a) < tolerance_deg and abs(b) < tolerance_deg:
+                break
+            d1 = 0 if abs(a) < tolerance_deg else (step1 if a > 0 else -step1)
+            d3 = 0 if abs(b) < tolerance_deg else (-step3 if b > 0 else step3)
+            new_m1p = int(np.clip(m1p + d1, m1_min, m1_max))
+            new_m3p = int(np.clip(m3p + d3, m3_min, m3_max))
+            set_position(self.port_handler, self.packet_handler, m1_id, new_m1p)
+            set_position(self.port_handler, self.packet_handler, m3_id, new_m3p)
+            time.sleep(settle_s)
+            _, _, alpha_new, beta_new, _ = self._read_state()
+            a_new, b_new = np.degrees(alpha_new), np.degrees(beta_new)
+            # overshot (sign flipped) or made it worse -> the step was too big, halve it.
+            # Otherwise grow it back (capped at max_step) -- without this, a step that
+            # shrank early from one bad overshoot stays tiny for the rest of the run
+            # and can't cover a large remaining error within the iteration budget
+            # (observed directly: beta stuck creeping ~5-9 ticks/iter, needing ~300
+            # more, after an early halving cascade).
+            if d1 != 0:
+                if np.sign(a_new) != np.sign(a) or abs(a_new) > abs(a):
+                    step1 = max(step1 // 2, 5)
+                else:
+                    step1 = min(step1 + step1 // 2, max_step)
+            if d3 != 0:
+                if np.sign(b_new) != np.sign(b) or abs(b_new) > abs(b):
+                    step3 = max(step3 // 2, 5)
+                else:
+                    step3 = min(step3 + step3 // 2, max_step)
+            m1p, m3p, a, b = new_m1p, new_m3p, a_new, b_new
+
+        if abs(a) >= tolerance_deg or abs(b) >= tolerance_deg:
+            print(f"[HardwarePlateEnv] leveling did not fully converge "
+                  f"(alpha={a:+.2f} beta={b:+.2f}) m1p={m1p}(bounds {m1_min}-{m1_max}) "
+                  f"m3p={m3p}(bounds {m3_min}-{m3_max}) step1={step1} step3={step3} "
+                  f"-- proceeding anyway")
+        else:
+            try:
+                with open(LAST_LEVEL_CACHE_PATH, "w") as f:
+                    json.dump({"m1": m1p, "m3": m3p}, f)
+            except OSError as e:
+                print(f"[HardwarePlateEnv] couldn't cache the converged level position: {e}")
+
+        # Refresh the action-mapping reference to center on whatever position
+        # leveling actually landed at (m1p, m3p), whether or not it fully converged
+        # -- landing near a hard bound (as motor3 often does) still beats mapping
+        # action=0 through the old static, badly-off-level calibration center. The
+        # resulting range is intentionally ASYMMETRIC (not run through
+        # _load_motor_calibration's symmetric-clamp helper): forcing symmetry here
+        # would mean either crippling the large, real, safe range on one side to
+        # match a tiny one on the other, or overshooting the hard safe bound on the
+        # short side -- neither is what map_action_to_position's independent
+        # negative-half/positive-half interpolation needs.
+        self._effective_calibration[m1_id] = (m1_min, m1p, m1_max)
+        self._effective_calibration[m3_id] = (m3_min, m3p, m3_max)
+
+    def _attempt_unstick(self, stuck_pos=None):
+        """Sweeps the plate hard through both axes -- used when the ball can't be
+        found for a while during reset(), or (via stuck_pos) when step()'s wedge
+        detector catches it sitting still despite a real commanded tilt. Most likely
+        cause is it settled in one of the known detection blind spots (on a corner
+        marker, or right at an edge); a full tilt sweep is a decent chance of rolling
+        it away from there, since there's no person around to nudge it by hand.
+        Finishes with a real camera-verified _level_plate() rather than just
+        commanding action=(0,0) -- action 0 maps to the calibrated center ticks,
+        which motor3's hysteresis has shown repeatedly is NOT reliably flat, so
+        ending the sweep there could easily leave the plate tilted enough to re-trap
+        the ball right after the sweep."""
+        def _freed(prev_xy):
+            xb, yb, _, _, found = self._read_state()
+            if not found:
+                return False
+            if prev_xy is None:
+                # called from reset()'s ball-not-found path -- no reference position
+                # to measure displacement against, so simply becoming visible counts
+                return True
+            return np.hypot(xb - prev_xy[0], yb - prev_xy[1]) > STUCK_MOVEMENT_THRESHOLD * 2
+
+        def _consolidate_escape(gentle):
+            # "Freed" so far has only meant "moved enough to prove it's not still
+            # wedged" -- often just a few mm, nowhere near clear of the trap. Spend
+            # a bit more time here driving it decisively toward the goal before
+            # handing back to normal control, so the ball actually arrives
+            # somewhere PD only needs to fine-tune from.
+            #
+            # gentle=True (called right after a plain targeted push already
+            # worked) skips the oscillating shake entirely and does a single
+            # smooth, sustained push -- no reason to also rattle the plate
+            # corner-to-corner when the gentle method alone was enough to move
+            # it. Watching this live, exactly that redundant shake (violent
+            # back-and-forth immediately after an already-successful gentle
+            # push, then dropping the ball back near where it started) is what
+            # looked wrong and unnecessary, not the underlying escape logic.
+            xb, yb, _, _, found = self._read_state()
+            if found:
+                start_xy = (xb, yb)
+                target = self.goal if np.any(self.goal) else np.zeros(2)
+                dx, dy = float(target[0] - xb), float(target[1] - yb)
+                norm = max(np.hypot(dx, dy), 1e-6)
+                toward = np.array([dx, dy]) / norm
+                if gentle:
+                    print(f"[HardwarePlateEnv] carrying the ball toward the goal after escape "
+                          f"(direction={tuple(toward.astype(np.float32))})...")
+                    self._write_action(toward.astype(np.float32))
+                    time.sleep(2.0)
+                else:
+                    # STEADY push toward goal was confirmed directly to NOT work
+                    # for a genuinely wedged ball, even sustained for a full 6
+                    # seconds at near-maximum tilt: it ended up within a few mm
+                    # of where it started, every time. A V-notch/ledge the ball
+                    # can nest into is exactly the situation where static
+                    # friction/geometry resists a constant force but not an
+                    # oscillating one (the same reason the shake escalation
+                    # below frees it at all when a steady tilt sweep doesn't).
+                    # So carry the same way here -- but ONLY when the escape
+                    # itself needed that level of force (tilt sweep or violent
+                    # shake succeeded, not a plain gentle push).
+                    #
+                    # A continuously-rotating "orbital" shake was also tried and
+                    # made things WORSE, not just ineffective: confirmed
+                    # directly, a fast-rotating tilt disrupts the camera's
+                    # continuous reference-corner tracking badly enough to
+                    # trigger repeated "lost tracking" resets in a near-endless
+                    # loop (a single escape attempt ran for MINUTES instead of
+                    # the intended ~6s). Stick with the plain, already-proven
+                    # 4-corner pattern -- same dwell (0.25s) as the escalation
+                    # tier's own violent shake, which has never caused a
+                    # tracking problem -- and only check displacement once per
+                    # full 4-corner cycle (~1s), not every tick.
+                    corners = [(-1.0, -1.0), (1.0, 1.0), (1.0, -1.0), (-1.0, 1.0)]
+                    print(f"[HardwarePlateEnv] shaking the ball toward the goal after escape "
+                          f"(direction={tuple(toward.astype(np.float32))})...")
+                    CARRY_TARGET_DIST = 0.03
+                    CARRY_MAX_S = 6.0
+                    t0 = time.time()
+                    while time.time() - t0 < CARRY_MAX_S:
+                        for a1, a2 in corners:
+                            self._write_action(np.array([a1, a2], dtype=np.float32))
+                            time.sleep(0.25)
+                        xb2, yb2, _, _, found2 = self._read_state()
+                        if found2 and np.hypot(xb2 - start_xy[0], yb2 - start_xy[1]) >= CARRY_TARGET_DIST:
+                            break
+                    # Whichever direction the shake happened to end up moving it,
+                    # follow up with a real directional push toward the goal now
+                    # that it's (hopefully) clear of the notch's immediate grip.
+                    self._write_action(toward.astype(np.float32))
+                    time.sleep(1.5)
+                self._write_action(np.array([0.0, 0.0], dtype=np.float32))
+                time.sleep(0.3)
+            self._level_plate(quick=True)
+
+        # Escalating attempts, cheapest/gentlest first -- stop as soon as one frees
+        # the ball rather than always running the full aggressive sequence. That
+        # matters beyond just wasted time: the rapid-reversal shake (last resort,
+        # below) vibrates the whole rig hard enough that it's a plausible cause of
+        # the U2D2 USB adapter repeatedly dropping mid-session, so it shouldn't run
+        # when a gentler attempt already worked.
+        if stuck_pos is not None:
+            # A physical pocket (paper edge + corner marker, confirmed by direct
+            # photo) didn't budge under a brief pulse at all -- try a SUSTAINED push
+            # specifically away from the known stuck position toward center first.
+            # Holding several seconds gives gravity a real chance to work the ball
+            # out of a real lip, which a quick tap may not.
+            dx, dy = -float(stuck_pos[0]), -float(stuck_pos[1])
+            norm = max(np.hypot(dx, dy), 1e-6)
+            action = np.clip(np.array([dx, dy]) / norm, -1.0, 1.0).astype(np.float32)
+            print(f"[HardwarePlateEnv] targeted sustained push toward center from "
+                  f"stuck position {tuple(stuck_pos)}, action={tuple(action)}...")
+            self._write_action(action)
+            time.sleep(3.0)
+            self._write_action(np.array([0.0, 0.0], dtype=np.float32))
+            time.sleep(0.3)
+            if _freed(stuck_pos):
+                print("[HardwarePlateEnv] targeted push freed the ball")
+                _consolidate_escape(gentle=True)
+                return True
+
+        print("[HardwarePlateEnv] attempting to unstick the ball with a tilt sweep...")
+        sweep = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
+        for _ in range(3):
+            for a1, a2 in sweep:
+                self._write_action(np.array([a1, a2], dtype=np.float32))
+                time.sleep(0.4)
+        if _freed(stuck_pos):
+            print("[HardwarePlateEnv] tilt sweep freed the ball")
+            _consolidate_escape(gentle=False)
+            return True
+
+        # Last resort -- fast direction reversals add momentum/vibration a slow tilt
+        # can't, but also shake the whole rig hard (see USB-drop note above), so only
+        # reached if the gentler attempts above didn't already work. Confirmed directly
+        # that the original version of this (6 cycles, 0.15s dwell, 2-point) never
+        # freed a genuinely wedged ball even once -- 0.15s may not even be enough for
+        # the servo to reach the commanded extreme before reversing, so the real
+        # swept range was smaller than intended. Go through all 4 corners (not just
+        # 2 opposite points), give each position enough time to actually get there,
+        # and repeat the whole round-trip several times, checking after each full
+        # round instead of only once at the very end.
+        print("[HardwarePlateEnv] sweep didn't free it, trying a violent shake...")
+        violent = [(-1.0, -1.0), (1.0, 1.0), (1.0, -1.0), (-1.0, 1.0)]
+        for round_i in range(5):
+            for a1, a2 in violent:
+                self._write_action(np.array([a1, a2], dtype=np.float32))
+                time.sleep(0.25)
+            if _freed(stuck_pos):
+                print(f"[HardwarePlateEnv] violent shake freed the ball (round {round_i + 1})")
+                _consolidate_escape(gentle=False)
+                return True
+        self._level_plate()
+        return _freed(stuck_pos)
+
+    def _build_obs(self, xb, yb, vx, vy, alpha, beta):
+        return np.array(
+            [xb, yb, vx, vy, alpha, beta, self.goal[0] - xb, self.goal[1] - yb],
+            dtype=np.float32,
+        )
+
+    # ---- Gym API -----------------------------------------------------------
+
+    def reset(self, *, seed=None, options=None):
+        """No human-in-the-loop: the ball is physically contained by the plate's
+        frame, so there's no canonical 'start position' to place it at -- each
+        episode just continues from wherever the ball currently is. Waits
+        (indefinitely, logging periodically) for the ball to be visible rather than
+        blocking on a person confirming placement, so training can run unattended.
+        If this waits a long time, the most likely cause is the ball stuck in one of
+        the known detection blind spots (resting on a corner marker, or under a
+        loose paper edge) -- a physical problem, not something this loop can fix."""
+        super().reset(seed=seed)
+        self._level_plate()
+
+        if self.fixed_goal == "center":
+            self.goal = np.array([0.0, 0.0], dtype=np.float32)
+        elif self.fixed_goal is not None:
+            self.goal = np.array(self.fixed_goal, dtype=np.float32)
+        else:
+            self.goal = np.array(
+                [
+                    self.np_random.uniform(-self._x_half + self.goal_margin, self._x_half - self.goal_margin),
+                    self.np_random.uniform(-self._y_half + self.goal_margin, self._y_half - self.goal_margin),
+                ],
+                dtype=np.float32,
+            )
+        print(f"[HardwarePlateEnv] goal: ({self.goal[0]:.3f}, {self.goal[1]:.3f})")
+
+        UNSTICK_EVERY_S = 6.0  # retry the recovery sweep this often while still stuck
+        LOG_EVERY_S = 5.0
+        xb, yb, alpha, beta, ball_found = self._read_state()
+        waited = 0.0
+        last_log = 0.0
+        last_unstick = 0.0
+        while not ball_found:
+            time.sleep(self.dt)
+            waited += self.dt
+            if waited - last_log >= LOG_EVERY_S:
+                print(f"[HardwarePlateEnv] still waiting for the ball to become visible "
+                      f"({waited:.0f}s) -- likely stuck on a corner marker or under the "
+                      f"paper edge")
+                last_log = waited
+            if waited - last_unstick >= UNSTICK_EVERY_S:
+                self._attempt_unstick()
+                last_unstick = waited
+            xb, yb, alpha, beta, ball_found = self._read_state()
+
+        # Probe whether the ball actually responds to a real tilt before starting the
+        # episode -- it can be found (visible, ball_found=True) yet already wedged
+        # against the frame/a corner marker from wherever the last episode left it,
+        # in which case the wait loop above never even triggers (it only fires on
+        # not-found). Confirmed directly: a fresh reset() returned a ball that then
+        # sat frozen for the next 25+ steps before step()'s own detector caught it --
+        # catching it here avoids starting an episode that's already doomed.
+        probe_dir = np.sign(self.goal - np.array([xb, yb])).astype(np.float32)
+        probe_dir = np.where(probe_dir == 0, 1.0, probe_dir)
+        for attempt in range(2):
+            self._write_action(probe_dir)
+            time.sleep(1.0)
+            self._write_action(np.array([0.0, 0.0], dtype=np.float32))
+            xb2, yb2, alpha, beta, ball_found = self._read_state()
+            if not ball_found or np.hypot(xb2 - xb, yb2 - yb) > STUCK_MOVEMENT_THRESHOLD * 2:
+                xb, yb = xb2, yb2
+                break
+            print(f"[HardwarePlateEnv] ball didn't respond to the reset probe tilt "
+                  f"(attempt {attempt + 1}/2) -- it's likely already wedged, unsticking")
+            self._attempt_unstick(stuck_pos=(xb, yb))
+            xb, yb, alpha, beta, ball_found = self._read_state()
+
+        self._prev_ball = np.array([xb, yb], dtype=np.float32)
+        self._step_count = 0
+        self._lost_count = 0
+        self._last_commanded_action = np.zeros(2, dtype=np.float32)  # plate is level at reset
+        self._pos_history = []
+        self._action_history = []
+        return self._build_obs(xb, yb, 0.0, 0.0, alpha, beta), {}
+
+    def step(self, action):
+        t0 = time.time()
+        action = np.clip(
+            action,
+            self._last_commanded_action - self.max_action_delta,
+            self._last_commanded_action + self.max_action_delta,
+        )
+        self._last_commanded_action = action
+        self._write_action(action)
+
+        elapsed = time.time() - t0
+        if elapsed < self.dt:
+            time.sleep(self.dt - elapsed)
+
+        xb, yb, alpha, beta, ball_found = self._read_state()
+        self._step_count += 1
+        self._lost_count = 0 if ball_found else self._lost_count + 1
+
+        if self._lost_count >= BALL_LOST_GRACE_FRAMES:
+            self._recenter_motors()
+            obs = self._build_obs(self._prev_ball[0], self._prev_ball[1], 0.0, 0.0, alpha, beta)
+            return obs, LOST_BALL_PENALTY, True, False, {"status": "ball_lost"}
+
+        if not ball_found:
+            # Within the grace period: hold the last known position, keep the episode alive.
+            xb, yb = self._prev_ball
+
+        self._pos_history.append((xb, yb))
+        self._action_history.append(action)
+        self._pos_history = self._pos_history[-STUCK_CHECK_WINDOW:]
+        self._action_history = self._action_history[-STUCK_CHECK_WINDOW:]
+        if len(self._pos_history) == STUCK_CHECK_WINDOW:
+            xs = [p[0] for p in self._pos_history]
+            ys = [p[1] for p in self._pos_history]
+            pos_range = max(max(xs) - min(xs), max(ys) - min(ys))
+            mean_action_mag = float(np.mean([np.abs(a).mean() for a in self._action_history]))
+            if pos_range < STUCK_MOVEMENT_THRESHOLD and mean_action_mag > STUCK_ACTION_THRESHOLD:
+                print(f"[HardwarePlateEnv] ball appears wedged (moved {pos_range*1000:.1f}mm over "
+                      f"{STUCK_CHECK_WINDOW} steps despite mean |action|={mean_action_mag:.2f}) "
+                      f"-- attempting to unstick")
+                freed = self._attempt_unstick(stuck_pos=(xb, yb))
+                self._pos_history = []
+                self._action_history = []
+                if not freed:
+                    # Full escalation (targeted push, sweep, fast shake) genuinely
+                    # didn't move it -- this is a real physical pocket, not something
+                    # more retrying fixes. End the episode cleanly instead of looping
+                    # detect->fail->detect->fail with no signal that anything is wrong.
+                    print("[HardwarePlateEnv] ball still wedged after full unstick "
+                          "escalation -- ending episode")
+                    xb, yb, alpha, beta, _ = self._read_state()
+                    obs = self._build_obs(xb, yb, 0.0, 0.0, alpha, beta)
+                    return obs, LOST_BALL_PENALTY, True, False, {"status": "ball_wedged"}
+
+        vx = (xb - self._prev_ball[0]) / self.dt
+        vy = (yb - self._prev_ball[1]) / self.dt
+        self._prev_ball = np.array([xb, yb], dtype=np.float32)
+
+        dist = float(np.hypot(self.goal[0] - xb, self.goal[1] - yb))
+        reward = -dist
+        status = "running"
+        if dist < self.goal_tolerance:
+            # Balancing task: staying inside the circle is the objective, not a
+            # one-shot target to reach and stop -- reward it every step it holds,
+            # but don't end the episode over it (only ball-lost/timeout do that).
+            reward += IN_CIRCLE_BONUS
+            status = "in_circle"
+
+        terminated = False
+        truncated = self._step_count >= self.max_episode_steps
+        obs = self._build_obs(xb, yb, vx, vy, alpha, beta)
+        return obs, reward, terminated, truncated, {"status": status}
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        # If SIGINT (or any exception) interrupted a serial transfer mid-flight, the
+        # SDK's port.is_using lock (protocol2_packet_handler.py) never gets cleared,
+        # and every subsequent command -- including this safety shutdown -- fails
+        # with "Port is in use!". This is exactly the shutdown path where we need
+        # those commands to go through regardless, so force the lock clear first.
+        if getattr(self, "port_handler", None) is not None:
+            self.port_handler.is_using = False
+        try:
+            if getattr(self, "port_handler", None) is not None and self._motors_torqued:
+                # Deliberately NOT recentering to the static calibrated value here --
+                # that value isn't reliably level (motor3's axis has real hysteresis,
+                # see _level_plate), so driving to it right before shutdown would
+                # silently undo whatever position (e.g. a just-leveled one) the plate
+                # was actually holding. Just disable torque in place; the plate settles
+                # gently under gravity when unpowered, it doesn't snap anywhere.
+                for dxl_id in DXL_IDS:
+                    self.packet_handler.write1ByteTxRx(self.port_handler, dxl_id, ADDR_TORQUE_ENABLE, 0)
+                self._motors_torqued = False
+        except Exception as e:
+            print(f"[HardwarePlateEnv] error while disabling torque: {e}")
+        try:
+            if getattr(self, "port_handler", None) is not None:
+                self.port_handler.closePort()
+        except Exception:
+            pass
+        try:
+            if getattr(self, "cap", None) is not None:
+                self.cap.release()
+        except Exception:
+            pass
+
+    def __del__(self):
+        self.close()

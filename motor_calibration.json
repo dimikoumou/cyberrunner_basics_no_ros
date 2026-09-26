@@ -1,10 +1,11 @@
 {
     "motor1_id": 1,
-    "motor1_center_position": 2761,
-    "motor1_min_position": 1961,
-    "motor1_max_position": 4000,
-    "motor2_id": 2,
-    "motor2_center_position": 2003,
-    "motor2_min_position": 1403,
-    "motor2_max_position": 4000
+    "motor1_center_position": 2674,
+    "motor1_min_position": 2374,
+    "motor1_max_position": 2824,
+    "motor2_id": 3,
+    "motor2_center_position": 2476,
+    "motor2_min_position": 1926,
+    "motor2_max_position": 3026,
+    "_note": "2026-08-30 later update: motor3/id3 got a Homing Offset of -1024 written to its EEPROM (the max magnitude the servo's firmware allows in normal Position Control Mode -- values outside +-1024 are silently ignored, confirmed directly). Root problem this fixes: this axis's real 'as level as achievable' position kept converging near 4090-4095, i.e. right at the single-turn Position Control ceiling (4095, hard firmware limit, one encoder revolution) -- leaving ~5 ticks of headroom on that side regardless of any PID/range tuning, so the controller had essentially zero authority to correct the ball away from whichever corner needed MORE tilt in that direction. The homing offset relabels every physical angle on this axis by -1024 ticks, so the same physical position that used to read ~4090-4095 now reads ~3066-3071 -- giving back up to 1024 ticks of real, usable headroom above it that were previously unreachable (they'd have needed tick values >4095, which the firmware refuses outright in this mode). EVERY absolute tick number below and throughout plate_env.py that refers to motor3/id3 was shifted by this same -1024 to stay physically consistent post-offset; last_level_position.json's cached value was cleared for the same reason (it referred to the old numbering). motor1/id1's numbers are untouched -- only motor3 got the homing offset. Prior notes on this file (motor3 stiction/hysteresis behavior, the corner-marker-vs-ball detection confusion, the camera-calibration priming order, the 2950-4050 range being real/safe) are still accurate as PHYSICAL facts, just all shifted by -1024 in tick-number terms."
 }
