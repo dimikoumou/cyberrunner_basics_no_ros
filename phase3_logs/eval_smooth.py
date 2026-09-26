@@ -15,7 +15,7 @@ for fn in sys.argv[1:]:
         elif fd[i] == 1 and inside: exits += 1; inside = False
     m = t > (t[0] + (t_arrive if np.isfinite(t_arrive) else 0))
     dur = max(1e-6, t[-1] - t[m][0]) if m.any() else np.nan
-    kicks = int((np.diff(k[m]) == 1).sum()) if m.any() else 0
+    km = k[m]; kicks = int(((km[:-1] == 0) & (km[1:] >= 1)).sum()) if m.any() else 0
     sp = np.hypot(vx, vy)
     print(f"{fn.split('/')[-1]}: goal r={1000*rad:.1f}mm | first arrival {t_arrive:.1f}s | after arrival: in region {100*np.nanmean(ic[m]):.0f}%, "
           f"exits {exits} ({exits/dur*60:.1f}/min), kicks {kicks/dur*60:.1f}/min, median dist {1000*np.nanmedian(d[m]):.1f}mm, "

@@ -93,6 +93,20 @@ KICK_LOCKOUT_S = 1.0    # after a release (2x after a give-up)
 # so a ball far from the goal is brought in at a limited speed instead of being
 # flung at it (far gains alone ask for 2.5 m/s per m of error, 0.375 m/s at 15 cm).
 V_REF_MAX = 0.08  # m/s
+# Timed pulse + planned brake (research workflow 2026-09-26; Yang & Tomizuka 1988
+# adaptive pulse-width control, van de Wouw & Leine 2012 impulsive control under
+# uncertain friction). Replaces the ramp-kick: the ramp pushed until motion was SEEN,
+# 0.15 s late, so the freed ball carried too much energy and rolled past a small dot
+# (82% of exits followed a kick). Now: a pulse just above breakaway for N frames,
+# then an open-loop brake for N frames, then coast; afterwards the advance p toward
+# the goal is measured and N adapted (N <- N*sqrt(d0/p)), per 3 cm plate cell. A
+# pulse that doesn't free the ball makes the next one stronger.
+PULSE_A0, PULSE_A_MAX = 0.40, 0.60   # pulse amplitude (action, 1.0 = 5 deg)
+PULSE_N0, PULSE_N_MIN, PULSE_N_MAX = 3, 2, 8   # pulse width in frames
+BRAKE_A = 0.12                       # ~0.6 deg: above rolling friction, below breakaway
+COAST_MAX_S = 1.5
+PULSE_LOCKOUT_S = 0.5
+PULSE_CELL_M = 0.03
 GOAL_CHECK_S = 0.5
 GOAL_CONFIRM = 3
 GOAL_AGREE_M = 0.004
@@ -196,6 +210,9 @@ def main():
     lockout_until = 0.0
     brk_mag = 0.0
     last_found = True
+    phase, ph_steps, u, d0, start_pos, cell, t_coast = "idle", 0, np.zeros(2), 0.0, None, None, 0.0
+    pulse_table = {}
+    PHASE_CODE = {"idle": 0, "pulse": 1, "brake": 2, "coast": 3}
     t_prev = None
     best_hold = 0.0
     hold_start = None
@@ -235,28 +252,43 @@ def main():
                     P = np.array(pos_buf)
                     stationary = (len(P) == STUCK_WIN and np.ptp(P[:, 0]) < STUCK_PTP
                                   and np.ptp(P[:, 1]) < STUCK_PTP)
-                    if kicking:
-                        if dist_now >= I_ZONE or np.hypot(xb - anchor[0], yb - anchor[1]) > BREAK_DISP:
-                            if dist_now < I_ZONE:
-                                brk_mag = float(np.hypot(*kick))  # what broke it free
-                            kicking = False
-                            kick[:] = 0
+                    if phase != "idle" and dist_now >= I_ZONE:
+                        phase = "idle"  # left the zone: abort, normal control takes over
+                    elif phase == "idle":
+                        if stationary and R_DONE < dist_now < I_ZONE and t_now >= lockout_until:
+                            u = e / max(dist_now, 1e-6)
+                            d0, start_pos = dist_now, np.array([xb, yb])
+                            cell = (int(round(xb / PULSE_CELL_M)), int(round(yb / PULSE_CELL_M)))
+                            pulse_table.setdefault(cell, [PULSE_A0, PULSE_N0])
+                            phase, ph_steps = "pulse", 0
+                    elif phase == "pulse":
+                        ph_steps += 1
+                        if ph_steps >= pulse_table[cell][1]:
+                            phase, ph_steps = "brake", 0
+                    elif phase == "brake":
+                        ph_steps += 1
+                        if ph_steps >= pulse_table[cell][1]:
+                            phase, t_coast = "coast", t_now
                             pos_buf.clear()
-                            lockout_until = t_now + KICK_LOCKOUT_S
+                    elif phase == "coast" and (stationary or t_now - t_coast > COAST_MAX_S):
+                        adv = float(np.dot(np.array([xb, yb]) - start_pos, u))
+                        A, N = pulse_table[cell]
+                        if adv < 0.001:
+                            A = min(A + 0.05, PULSE_A_MAX)  # didn't break free -> stronger
                         else:
-                            kick += e / max(dist_now, 1e-6) * KICK_RATE * dt_real
-                            n = float(np.hypot(*kick))
-                            if n >= KICK_MAX:
-                                kick *= KICK_MAX / n
-                                cap_t = cap_t or t_now
-                                if t_now - cap_t > KICK_HOLD_S:
-                                    kicking = False
-                                    kick[:] = 0
-                                    pos_buf.clear()
-                                    lockout_until = t_now + 2 * KICK_LOCKOUT_S
-                    elif stationary and R_DONE < dist_now < I_ZONE and t_now >= lockout_until:
-                        kicking, anchor, cap_t = True, P.mean(0), None
-                        kick = KICK_START_FRAC * brk_mag * e / max(dist_now, 1e-6)
+                            N = int(np.clip(round(N * np.sqrt(d0 / max(adv, 0.001))), PULSE_N_MIN, PULSE_N_MAX))
+                        pulse_table[cell] = [A, N]
+                        print(f"  pulse: d0={d0 * 1000:.1f}mm advance={adv * 1000:.1f}mm -> cell {cell} A={A:.2f} N={N}")
+                        phase = "idle"
+                        lockout_until = t_now + PULSE_LOCKOUT_S
+                        pos_buf.clear()
+                if phase == "pulse":
+                    kick = pulse_table[cell][0] * u
+                elif phase == "brake":
+                    kick = -BRAKE_A * u
+                else:
+                    kick = np.zeros(2)
+                kicking = phase != "idle"
                 # the integral learns the level bias only from a rolling ball, never stiction
                 if dist_now < I_ZONE and not kicking and not stationary:
                     integ = np.clip(integ + KI * e * dt_real, -I_MAX, I_MAX)
@@ -265,6 +297,8 @@ def main():
                 if v_ref_mag > V_REF_MAX:
                     v_ref *= V_REF_MAX / v_ref_mag
                 pd = kd * (v_ref - np.array([vx, vy]))
+                if phase in ("pulse", "brake"):
+                    pd = pd - np.dot(pd, u) * u  # the pulse/brake own the goal direction
                 action = np.clip(
                     np.array([pd[0] + integ[0] + kick[0], pd[1] + integ[1] + kick[1]], dtype=np.float32),
                     -0.8, 0.8,
@@ -313,7 +347,7 @@ def main():
                 log.write(f"{now - t_start:.3f},{episode},{i},{obs[0]:.5f},{obs[1]:.5f},{obs[2]:.4f},"
                           f"{obs[3]:.4f},{obs[4]:.5f},{obs[5]:.5f},{dist:.5f},{int(in_circle)},{int(ball_found)},"
                           f"{action[0]:.3f},{action[1]:.3f},{info['status']},"
-                          f"{integ[0]:.4f},{integ[1]:.4f},{kick[0]:.4f},{kick[1]:.4f},{int(kicking)},"
+                          f"{integ[0]:.4f},{integ[1]:.4f},{kick[0]:.4f},{kick[1]:.4f},{PHASE_CODE[phase]},"
                           + (",".join(f"{v:.1f}" for v in env.last_inner_corners.ravel())
                              if getattr(env, "last_inner_corners", None) is not None else ",,,,,,,")
                           + f",{goal[0]:.5f},{goal[1]:.5f},{goal_tol:.5f}\n")
