@@ -15,6 +15,8 @@ RED_MIN_SAT = 40
 MIN_RED_PIXELS = 20
 RADIUS_RANGE_M = (0.005, 0.09)   # plausible goal radius (small dots down to ~1 cm across are fine)
 MAX_CENTER_SPREAD_M = 0.004      # per-frame centre estimates must agree this well
+BALL_CLEAR_PX = 10               # ball must be this far outside the circle's edge (640x360 px) for a clean view
+LAST_GOAL_PATH = __import__("os").path.abspath(__import__("os").path.join(__import__("os").path.dirname(__file__), "..", "last_goal.json"))
 
 
 def _detect_once(env, frame):
@@ -53,7 +55,10 @@ def _detect_once(env, frame):
     # hole inside it, which RETR_EXTERNAL ignores.
     closed = cv2.morphologyEx(component.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
     contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-    outer = max(contours, key=cv2.contourArea).reshape(-1, 2).astype(np.float64)
+    hull = cv2.convexHull(max(contours, key=cv2.contourArea)).reshape(-1, 2).astype(np.float64)
+    seg = np.vstack([hull, hull[:1]])
+    outer = np.vstack([np.linspace(seg[i], seg[i + 1], max(2, int(np.hypot(*(seg[i + 1] - seg[i]))) + 1))[:-1]
+                       for i in range(len(hull))])
     xs, ys = outer[:, 0], outer[:, 1]
     # least-squares circle fit: (x-cx)^2 + (y-cy)^2 = r^2, linearized
     A = np.column_stack([2 * xs, 2 * ys, np.ones(len(xs))])
@@ -63,7 +68,13 @@ def _detect_once(env, frame):
     center = measurements.ball_pos_backproject(pts_undist[0], plate_pose.K, plate_pose.T__C_M)
     edge = measurements.ball_pos_backproject(pts_undist[1], plate_pose.K, plate_pose.T__C_M)
     radius = float(np.hypot(edge[0] - center[0], edge[1] - center[1]))
-    return np.array(center[:2], dtype=float), radius, (float(cx), float(cy), r_px)
+    # A ball sitting on (or touching) a small goal hides part of it and biases the
+    # fit (a 9.0 mm dot read as 5.9-7.4 mm, centre off by 3 mm): flag such views.
+    occluded = False
+    ball_px = getattr(env.pipeline.measurements.detector, "ball_pos", None)
+    if ball_px is not None and np.all(np.isfinite(ball_px)):
+        occluded = np.hypot(ball_px[1] - cx, ball_px[0] - cy) < r_px + BALL_CLEAR_PX
+    return np.array(center[:2], dtype=float), radius, (float(cx), float(cy), r_px), occluded
 
 
 def detect_on_frame(env, frame):
@@ -77,7 +88,9 @@ def detect_on_frame(env, frame):
         return None
     if r is None:
         return None
-    center, radius, _ = r
+    center, radius, _, occluded = r
+    if occluded:
+        return None  # live tracking only trusts unobscured views
     if not (RADIUS_RANGE_M[0] <= radius <= RADIUS_RANGE_M[1]):
         return None
     if abs(center[0]) > env._x_half or abs(center[1]) > env._y_half:
@@ -110,6 +123,21 @@ def detect_goal_circle(env, n_frames=9):
     if len(results) < max(3, n_frames // 2):
         raise RuntimeError(f"goal circle: only found red in {len(results)} frames -- is a red "
                            f"circle drawn on the sheet and visible to the camera?")
+    clean = [r for r in results if not r[3]]
+    source = "clean"
+    if len(clean) >= 3:
+        results = clean
+    else:
+        # Ball is sitting on the goal (typical when restarting where it balanced).
+        # Reuse the last clean detection if the visible red lies inside it (same
+        # sheet); otherwise take the occluded fit as provisional -- live tracking
+        # refines it once the ball moves off.
+        occ_c = np.median(np.array([r[0] for r in results]), axis=0)
+        last = load_last_goal()
+        if last is not None and np.hypot(*(occ_c - np.array(last["center"]))) < last["radius"] + 0.003:
+            return {"center": tuple(last["center"]), "radius": last["radius"], "px": None, "frame": frame,
+                    "n_frames": 0, "spread_m": 0.0, "source": "last_goal"}
+        source = "occluded"
     centers = np.array([r[0] for r in results])
     radii = np.array([r[1] for r in results])
     center, radius = np.median(centers, axis=0), float(np.median(radii))
@@ -124,11 +152,33 @@ def detect_goal_circle(env, n_frames=9):
         raise RuntimeError(f"goal circle: centre ({center[0]:.3f}, {center[1]:.3f}) is off the plate "
                            f"(+-{env._x_half:.3f}, +-{env._y_half:.3f})")
     px = tuple(np.median(np.array([r[2] for r in results]), axis=0))
-    return {"center": (float(center[0]), float(center[1])), "radius": radius,
-            "px": px, "frame": frame, "n_frames": len(results), "spread_m": spread}
+    out = {"center": (float(center[0]), float(center[1])), "radius": radius,
+           "px": px, "frame": frame, "n_frames": len(results), "spread_m": spread, "source": source}
+    if source == "clean":
+        save_last_goal(out["center"], radius)
+    return out
+
+
+def load_last_goal():
+    try:
+        with open(LAST_GOAL_PATH) as f:
+            d = __import__("json").load(f)
+        return {"center": (float(d["center"][0]), float(d["center"][1])), "radius": float(d["radius"])}
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def save_last_goal(center, radius):
+    try:
+        with open(LAST_GOAL_PATH, "w") as f:
+            __import__("json").dump({"center": [float(center[0]), float(center[1])], "radius": float(radius)}, f)
+    except OSError:
+        pass
 
 
 def save_debug(result, path):
+    if result.get("px") is None or result.get("frame") is None:
+        return
     debug = result["frame"].copy()
     cx, cy, r = result["px"]
     cv2.circle(debug, (int(round(cx)), int(round(cy))), int(round(r)), (0, 255, 0), 1)

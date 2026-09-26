@@ -251,6 +251,8 @@ class HardwarePlateEnv(gym.Env):
             that can drop the U2D2. A wedged ball then simply ends the episode.
         """
         super().__init__()
+        self._closed = False  # set first, so close()/__del__ work even if startup fails
+        self._motors_torqued = False
         self.control_hz = control_hz
         self.dt = 1.0 / control_hz
         self.goal_tolerance = goal_tolerance

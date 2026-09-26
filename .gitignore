@@ -109,3 +109,5 @@ rl_hw/calib_images/
 rl_hw/models/
 state_est/models_smoke/
 last_level_position.json
+pulse_table.json
+last_goal.json

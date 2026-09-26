@@ -21,13 +21,14 @@ Usage:
 import sys
 import os
 import time
+import json
 from collections import deque
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 from plate_env import HardwarePlateEnv  # noqa: E402
-from goal_circle import detect_goal_circle, detect_on_frame, save_debug  # noqa: E402
+from goal_circle import detect_goal_circle, detect_on_frame, save_debug, save_last_goal  # noqa: E402
 
 SNAPSHOT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pd_snapshots")
 SNAPSHOT_EVERY_S = float(os.environ.get("PD_SNAPSHOT_S", "2.0"))  # e.g. 30 for long unattended runs
@@ -93,6 +94,11 @@ KICK_LOCKOUT_S = 1.0    # after a release (2x after a give-up)
 # so a ball far from the goal is brought in at a limited speed instead of being
 # flung at it (far gains alone ask for 2.5 m/s per m of error, 0.375 m/s at 15 cm).
 V_REF_MAX = 0.08  # m/s
+# Braking curve (research experiment #6): the allowed approach speed also shrinks
+# with the distance left, v <= sqrt(2*A_BRAKE*(dist - r/2)), so the ball can stop
+# at the target. With only the 8 cm/s cap a ball arriving at a 9 mm dot coasted
+# ~10 cm on paper (rolling decel ~0.03 m/s^2) and overshot it by 42-52 mm.
+A_BRAKE = 0.05    # m/s^2 -- gentle tilt-braking on top of rolling friction
 # Timed pulse + planned brake (research workflow 2026-09-26; Yang & Tomizuka 1988
 # adaptive pulse-width control, van de Wouw & Leine 2012 impulsive control under
 # uncertain friction). Replaces the ramp-kick: the ramp pushed until motion was SEEN,
@@ -101,12 +107,14 @@ V_REF_MAX = 0.08  # m/s
 # then an open-loop brake for N frames, then coast; afterwards the advance p toward
 # the goal is measured and N adapted (N <- N*sqrt(d0/p)), per 3 cm plate cell. A
 # pulse that doesn't free the ball makes the next one stronger.
-PULSE_A0, PULSE_A_MAX = 0.40, 0.60   # pulse amplitude (action, 1.0 = 5 deg)
+PULSE_A0, PULSE_A_MAX = 0.40, 0.90   # pulse amplitude (action, 1.0 = 5 deg); 0.6 often failed to free the ball on the wall side of a near-edge dot
 PULSE_N0, PULSE_N_MIN, PULSE_N_MAX = 3, 2, 8   # pulse width in frames
 BRAKE_A = 0.12                       # ~0.6 deg: above rolling friction, below breakaway
 COAST_MAX_S = 1.5
 PULSE_LOCKOUT_S = 0.5
 PULSE_CELL_M = 0.03
+# learned per-cell pulse settings persist across runs (smooth from the first second)
+PULSE_TABLE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "pulse_table.json"))
 GOAL_CHECK_S = 0.5
 GOAL_CONFIRM = 3
 GOAL_AGREE_M = 0.004
@@ -164,7 +172,15 @@ def main():
         fixed_goal=GOAL, goal_tolerance=GOAL_TOLERANCE, max_action_delta=0.5,
         max_episode_steps=episode_steps, allow_unstick=False,
     )
-    if os.environ.get("PD_FIXED_GOAL") == "1":
+    live_goal = True
+    goal_provisional = False
+    if os.environ.get("PD_GOAL"):
+        # virtual goal for testing: PD_GOAL="x,y,r" in metres; disables live re-detection
+        gx_, gy_, gr_ = (float(v) for v in os.environ["PD_GOAL"].split(","))
+        goal, goal_tol, live_goal = (gx_, gy_), gr_, False
+        env._level_plate()
+        print(f"using virtual goal ({goal[0]:+.4f}, {goal[1]:+.4f}) r={goal_tol:.4f} (PD_GOAL, live tracking off)")
+    elif os.environ.get("PD_FIXED_GOAL") == "1":
         goal, goal_tol = GOAL, GOAL_TOLERANCE
         print(f"using fixed goal ({goal[0]:+.4f}, {goal[1]:+.4f}) r={goal_tol:.4f} (PD_FIXED_GOAL=1)")
     else:
@@ -179,8 +195,9 @@ def main():
             sys.exit(f"could not find the goal circle on the sheet: {e}")
         goal, goal_tol = res["center"], res["radius"]
         save_debug(res, os.path.join(LOG_DIR, os.path.basename(log_path).replace(".csv", "_goal.jpg")))
-        print(f"goal circle detected: centre ({goal[0]:+.4f}, {goal[1]:+.4f}) m, radius {goal_tol * 1000:.1f} mm "
-              f"(median of {res['n_frames']} frames, spread {res['spread_m'] * 1000:.1f} mm)")
+        print(f"goal circle detected ({res['source']}): centre ({goal[0]:+.4f}, {goal[1]:+.4f}) m, radius "
+              f"{goal_tol * 1000:.1f} mm (median of {res['n_frames']} frames, spread {res['spread_m'] * 1000:.1f} mm)")
+        goal_provisional = res["source"] == "occluded"
     env.fixed_goal = goal
     env.goal_tolerance = goal_tol
     # Edge guard only where the ball is past the wall threshold AND further out than
@@ -212,6 +229,12 @@ def main():
     last_found = True
     phase, ph_steps, u, d0, start_pos, cell, t_coast = "idle", 0, np.zeros(2), 0.0, None, None, 0.0
     pulse_table = {}
+    try:
+        with open(PULSE_TABLE_PATH) as f:
+            pulse_table = {tuple(int(v) for v in k.split(",")): list(val) for k, val in json.load(f).items()}
+        print(f"loaded learned pulse settings for {len(pulse_table)} plate cells")
+    except (OSError, ValueError):
+        pass
     PHASE_CODE = {"idle": 0, "pulse": 1, "brake": 2, "coast": 3}
     t_prev = None
     best_hold = 0.0
@@ -252,10 +275,11 @@ def main():
                     P = np.array(pos_buf)
                     stationary = (len(P) == STUCK_WIN and np.ptp(P[:, 0]) < STUCK_PTP
                                   and np.ptp(P[:, 1]) < STUCK_PTP)
-                    if phase != "idle" and dist_now >= I_ZONE:
-                        phase = "idle"  # left the zone: abort, normal control takes over
-                    elif phase == "idle":
-                        if stationary and R_DONE < dist_now < I_ZONE and t_now >= lockout_until:
+                    # Pulses work anywhere on the plate: with the approach speed capped, a
+                    # STILL ball far from the goal only gets kd*V_REF_MAX = 0.16 (0.8 deg),
+                    # below the ~2 deg breakaway -- it sat 11 cm away for a whole run.
+                    if phase == "idle":
+                        if stationary and dist_now > R_DONE and t_now >= lockout_until:
                             u = e / max(dist_now, 1e-6)
                             d0, start_pos = dist_now, np.array([xb, yb])
                             cell = (int(round(xb / PULSE_CELL_M)), int(round(yb / PULSE_CELL_M)))
@@ -274,10 +298,15 @@ def main():
                         adv = float(np.dot(np.array([xb, yb]) - start_pos, u))
                         A, N = pulse_table[cell]
                         if adv < 0.001:
-                            A = min(A + 0.05, PULSE_A_MAX)  # didn't break free -> stronger
+                            A = min(A + 0.10, PULSE_A_MAX)  # didn't break free -> stronger
                         else:
                             N = int(np.clip(round(N * np.sqrt(d0 / max(adv, 0.001))), PULSE_N_MIN, PULSE_N_MAX))
                         pulse_table[cell] = [A, N]
+                        try:
+                            with open(PULSE_TABLE_PATH, "w") as f:
+                                json.dump({f"{k[0]},{k[1]}": v for k, v in pulse_table.items()}, f)
+                        except OSError:
+                            pass
                         print(f"  pulse: d0={d0 * 1000:.1f}mm advance={adv * 1000:.1f}mm -> cell {cell} A={A:.2f} N={N}")
                         phase = "idle"
                         lockout_until = t_now + PULSE_LOCKOUT_S
@@ -294,8 +323,9 @@ def main():
                     integ = np.clip(integ + KI * e * dt_real, -I_MAX, I_MAX)
                 v_ref = (kp / kd) * e
                 v_ref_mag = float(np.hypot(*v_ref))
-                if v_ref_mag > V_REF_MAX:
-                    v_ref *= V_REF_MAX / v_ref_mag
+                v_allow = min(V_REF_MAX, float(np.sqrt(2 * A_BRAKE * max(dist_now - 0.5 * goal_tol, 0.0))))
+                if v_ref_mag > v_allow:
+                    v_ref *= v_allow / max(v_ref_mag, 1e-9)
                 pd = kd * (v_ref - np.array([vx, vy]))
                 if phase in ("pulse", "brake"):
                     pd = pd - np.dot(pd, u) * u  # the pulse/brake own the goal direction
@@ -352,12 +382,15 @@ def main():
                              if getattr(env, "last_inner_corners", None) is not None else ",,,,,,,")
                           + f",{goal[0]:.5f},{goal[1]:.5f},{goal_tol:.5f}\n")
 
-                if now - last_goal_check >= GOAL_CHECK_S and getattr(env, "_last_frame", None) is not None:
+                if live_goal and now - last_goal_check >= GOAL_CHECK_S and getattr(env, "_last_frame", None) is not None:
                     last_goal_check = now
                     cand = detect_on_frame(env, env._last_frame)
+                    # a provisional goal (fitted with the ball covering part of it) is
+                    # refined by the first clean view, however small the difference
+                    mv, rc = (0.0005, 0.0005) if goal_provisional else (GOAL_MOVE_M, GOAL_RADIUS_CHANGE_M)
                     differs = cand is not None and (
-                        np.hypot(cand[0][0] - goal[0], cand[0][1] - goal[1]) > GOAL_MOVE_M
-                        or abs(cand[1] - goal_tol) > GOAL_RADIUS_CHANGE_M)
+                        np.hypot(cand[0][0] - goal[0], cand[0][1] - goal[1]) > mv
+                        or abs(cand[1] - goal_tol) > rc)
                     if not differs:
                         goal_cands.clear()
                     else:
@@ -380,6 +413,8 @@ def main():
                             pos_buf.clear()
                             goal_cands.clear()
                             n_goal_changes += 1
+                            goal_provisional = False
+                            save_last_goal(goal, goal_tol)
                             print(f"\n>>> NEW GOAL circle: centre ({goal[0]:+.4f}, {goal[1]:+.4f}) m, "
                                   f"radius {goal_tol * 1000:.1f} mm <<<\n")
 

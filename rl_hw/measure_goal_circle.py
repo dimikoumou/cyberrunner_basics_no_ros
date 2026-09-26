@@ -21,8 +21,11 @@ def main():
     try:
         res = detect_goal_circle(env)
         (gx, gy), r = res["center"], res["radius"]
-        cx, cy, r_px = res["px"]
-        print(f"detected circle (pixel, this frame's resolution): center=({cx:.1f},{cy:.1f}) radius={r_px:.1f}")
+        print(f"source: {res['source']}  (clean = ball not covering the circle; last_goal = ball on it, "
+              f"reused the last clean measurement)")
+        if res["px"] is not None:
+            cx, cy, r_px = res["px"]
+            print(f"detected circle (pixel, this frame's resolution): center=({cx:.1f},{cy:.1f}) radius={r_px:.1f}")
         print(f"\ncircle center (world meters): ({gx:.4f}, {gy:.4f})")
         print(f"circle radius (world meters): {r:.4f}")
         print(f"median of {res['n_frames']} frames, centre spread {res['spread_m'] * 1000:.1f} mm")
