@@ -85,6 +85,9 @@ EDGE_X, EDGE_Y = 0.10, 0.085
 def main():
     total_steps = int(sys.argv[1]) if len(sys.argv) > 1 else 6000
     max_episodes = int(sys.argv[2]) if len(sys.argv) > 2 else 15
+    # optional: hold target in s (0 = never stop early), episode length in steps
+    hold_target = float(sys.argv[3]) if len(sys.argv) > 3 else HOLD_TARGET_S
+    episode_steps = int(sys.argv[4]) if len(sys.argv) > 4 else 1500
     os.makedirs(SNAPSHOT_DIR, exist_ok=True)
     os.makedirs(LOG_DIR, exist_ok=True)
     log_path = os.path.join(LOG_DIR, time.strftime("pd_%Y%m%d_%H%M%S.csv"))
@@ -104,7 +107,7 @@ def main():
     # re-level + probe tilt throws the ball out of the circle. No shaking at all.
     env = HardwarePlateEnv(
         fixed_goal=GOAL, goal_tolerance=GOAL_TOLERANCE, max_action_delta=0.5,
-        max_episode_steps=1500, allow_unstick=False,
+        max_episode_steps=episode_steps, allow_unstick=False,
     )
     t_start = time.time()
     integ = np.zeros(2)
@@ -199,8 +202,8 @@ def main():
                           f"{'IN' if in_circle else '  '}  action=({action[0]:+.2f},{action[1]:+.2f})  "
                           f"I=({integ[0]:+.3f},{integ[1]:+.3f})  "
                           f"status={info['status']}")
-                if best_hold >= HOLD_TARGET_S:
-                    print(f"  reached {HOLD_TARGET_S:.0f}s continuous hold -- stopping")
+                if hold_target > 0 and best_hold >= hold_target:
+                    print(f"  reached {hold_target:.0f}s continuous hold -- stopping")
                     break
                 if terminated or truncated:
                     print(f"  episode {episode} ended at step {i}: {info['status']}")
@@ -210,7 +213,7 @@ def main():
             pct = 100 * ep_in_circle / max(1, ep_steps)
             print(f"  episode {episode} summary: {ep_in_circle}/{ep_steps} steps in circle ({pct:.1f}%)")
             hold_start = None  # a hold never spans a reset()
-            if best_hold >= HOLD_TARGET_S:
+            if hold_target > 0 and best_hold >= hold_target:
                 break
 
         overall_pct = 100 * total_in_circle / max(1, total_taken)

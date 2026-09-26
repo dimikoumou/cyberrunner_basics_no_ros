@@ -317,6 +317,7 @@ class HardwarePlateEnv(gym.Env):
 
         self.goal = np.zeros(2, dtype=np.float32)
         self._prev_ball = np.zeros(2, dtype=np.float32)
+        self._prev_t = None
         self._last_plausible_tilt = (0.0, 0.0)
         self._bad_tilt_streak = 0
         self._step_count = 0
@@ -1074,6 +1075,7 @@ class HardwarePlateEnv(gym.Env):
             xb, yb, alpha, beta, ball_found = self._read_state()
 
         self._prev_ball = np.array([xb, yb], dtype=np.float32)
+        self._prev_t = time.time()
         self._step_count = 0
         self._lost_count = 0
         self._last_commanded_action = np.zeros(2, dtype=np.float32)  # plate is level at reset
@@ -1139,8 +1141,15 @@ class HardwarePlateEnv(gym.Env):
                     obs = self._build_obs(xb, yb, 0.0, 0.0, alpha, beta)
                     return obs, LOST_BALL_PENALTY, True, False, {"status": "ball_wedged"}
 
-        vx = (xb - self._prev_ball[0]) / self.dt
-        vy = (yb - self._prev_ball[1]) / self.dt
+        # Real elapsed time between frames, not the nominal 1/control_hz: the loop
+        # actually runs at ~21 Hz (not 55), so dividing by self.dt inflated every
+        # velocity -- and the PD's D term -- ~2.4x (measured 2026-09-26 in the
+        # logs; it drove a ~1.45 Hz limit cycle around the goal).
+        now = time.time()
+        dt_meas = min(max(now - self._prev_t, 1e-3), 0.25) if self._prev_t is not None else self.dt
+        self._prev_t = now
+        vx = (xb - self._prev_ball[0]) / dt_meas
+        vy = (yb - self._prev_ball[1]) / dt_meas
         self._prev_ball = np.array([xb, yb], dtype=np.float32)
 
         dist = float(np.hypot(self.goal[0] - xb, self.goal[1] - yb))
