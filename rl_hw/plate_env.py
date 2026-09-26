@@ -87,7 +87,7 @@ FIXED_CORNERS_CACHE_PATH = os.path.join(STATE_EST_DIR, "fixed_corners_cache.json
 # corrected every step against the camera-measured angle.
 TILT_MAX_DEG = 5.0                    # |action|=1 -> 5deg, inside both axes' measured range
 TICKS_PER_DEG = {1: -140.0, 3: 100.0}  # d(ticks)/d(angle): +m1 lowers alpha, +m3 raises beta
-TILT_GAIN = 0.5                        # fraction of the measured angle error corrected per step
+TILT_GAIN = 0.25                       # per-step correction; 0.5 was above the ~0.445 stability limit for the 2-3 step tilt lag (2 Hz, +-5deg plate shake, 2026-09-26)
 MAX_TICKS_PER_STEP = 250
 TICK_BOUNDS = {1: (1800, 3900), 3: (700, 3800)}  # where each axis's angle plateaus (measured)
 LEVEL_TOL_DEG = 0.4

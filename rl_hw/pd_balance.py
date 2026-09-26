@@ -57,7 +57,7 @@ GAIN_BLEND_WIDTH = 0.05  # over this much additional distance
 # clamped to +-0.3 action (+-1.5deg), carried across episodes (the bias is).
 KI = 1.0
 I_ZONE = 0.10
-I_MAX = 0.3
+I_MAX = 0.3  # 0.6 tried 2026-09-26: stick-slip (ball stuck ~1.5-2deg breakaway, then 50-80mm overshoot), in-circle 88.8% -> 76.8%; reverted
 GOAL = (-0.0078, 0.0060)  # re-measured 2026-09-26 (filled red disc, outer-edge fit)
 GOAL_TOLERANCE = 0.0455
 # Direct feedback while watching this live: correcting X and Y together lets the
