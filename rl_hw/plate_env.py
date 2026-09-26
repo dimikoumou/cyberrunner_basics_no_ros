@@ -16,6 +16,7 @@ import sys
 import glob
 import json
 import time
+import threading
 
 import numpy as np
 import cv2
@@ -40,6 +41,32 @@ from state_est_control import init_dynamixel, set_position, ADDR_TORQUE_ENABLE  
 # second tilt axis is ID 3, confirmed via a real alpha/beta response). Override here
 # rather than editing state_est_control.py.
 DXL_IDS = [1, 3]
+
+
+def _find_rig_camera(want_wh=(1920, 1080), max_index=4):
+    """Index of the rig camera. macOS renumbers cameras when USB devices are
+    re-plugged (2026-09-26: the See3CAM moved from index 0 to 1 and index 0 became
+    the Mac's built-in camera, so the pipeline silently looked at the wrong
+    camera). Pick the first camera that really delivers want_wh frames -- the
+    built-in camera tops out at 1280x720. CYBERRUNNER_CAM=<index> overrides."""
+    if os.environ.get("CYBERRUNNER_CAM") is not None:
+        return int(os.environ["CYBERRUNNER_CAM"])
+    for idx in range(max_index):
+        cap = cv2.VideoCapture(idx, cv2.CAP_AVFOUNDATION) if sys.platform == "darwin" else cv2.VideoCapture(idx)
+        try:
+            if not cap.isOpened():
+                continue
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, want_wh[0])
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, want_wh[1])
+            for _ in range(5):
+                ok, frame = cap.read()
+                if ok and frame is not None:
+                    break
+            if ok and frame is not None and frame.shape[1] == want_wh[0] and frame.shape[0] == want_wh[1]:
+                return idx
+        finally:
+            cap.release()
+    raise RuntimeError(f"no camera delivering {want_wh[0]}x{want_wh[1]} found -- is the rig camera plugged in?")
 
 
 def _resolve_dynamixel_port():
@@ -87,7 +114,7 @@ FIXED_CORNERS_CACHE_PATH = os.path.join(STATE_EST_DIR, "fixed_corners_cache.json
 # corrected every step against the camera-measured angle.
 TILT_MAX_DEG = 5.0                    # |action|=1 -> 5deg, inside both axes' measured range
 TICKS_PER_DEG = {1: -140.0, 3: 100.0}  # d(ticks)/d(angle): +m1 lowers alpha, +m3 raises beta
-TILT_GAIN = 0.25                       # per-step correction; 0.5 was above the ~0.445 stability limit for the 2-3 step tilt lag (2 Hz, +-5deg plate shake, 2026-09-26)
+TILT_GAIN = 0.15                       # per-step correction. 0.5 shook the plate (2-3 step lag @22 Hz); 0.25 was fine @22 Hz but jittered 2.5deg once the 30 fps camera fix made the loop ~29 Hz (lag ~4-5 steps)
 MAX_TICKS_PER_STEP = 250
 TICK_BOUNDS = {1: (1800, 3900), 3: (700, 3800)}  # where each axis's angle plateaus (measured)
 LEVEL_TOL_DEG = 0.4
@@ -192,7 +219,7 @@ class HardwarePlateEnv(gym.Env):
         goal_tolerance=GOAL_TOLERANCE,
         goal_margin=GOAL_MARGIN,
         max_episode_steps=600,
-        camera_index=0,
+        camera_index=None,
         show_image=False,
         fixed_goal=None,
         max_action_delta=0.35,
@@ -258,10 +285,21 @@ class HardwarePlateEnv(gym.Env):
         self._x_half = float(self.pipeline.measurements.plate_pose.C2C_X) / 2
         self._y_half = float(self.pipeline.measurements.plate_pose.C2C_Y) / 2
 
+        if camera_index is None:
+            camera_index = _find_rig_camera()
+        print(f"[HardwarePlateEnv] using camera index {camera_index}")
         self.cap, _, _ = init_capture("CAM", camera_index, None, None)
+        # init_capture() requests 55 fps. Measured 2026-09-26 (See3CAM_24CUG,
+        # 1920x1080, USB 3): at the 55 fps request the camera delivered ~43 fps but
+        # with ~1.03 s of image delay (motor step -> pixels changing), which made the
+        # tilt servo swing the plate side to side; at 30 fps the delay is ~0.15 s.
+        # The control loop only consumes ~22 frames/s, so 30 fps loses nothing.
+        if self.cap is not None:
+            self.cap.set(cv2.CAP_PROP_FPS, 30)
         if self.cap is None or not self.cap.isOpened():
             raise RuntimeError("HardwarePlateEnv: could not open the camera")
         self._lock_camera_exposure()
+        self._start_frame_reader()
 
         state_est_control.DXL_PORT = _resolve_dynamixel_port()
         self.port_handler, self.packet_handler = init_dynamixel()
@@ -485,8 +523,44 @@ class HardwarePlateEnv(gym.Env):
 
     # ---- hardware I/O ----------------------------------------------------
 
+    def _start_frame_reader(self):
+        """Read the camera continuously in a background thread and keep only the
+        newest frame. The capture backend queues frames the camera delivers faster
+        than the ~22 Hz control loop consumes them; measured 2026-09-26 after a USB
+        re-plug (camera at ~43 fps): command->camera delay grew from ~0.1 s to
+        ~1.0 s (motor itself arrives in 0.11 s), and the tilt servo swung the plate
+        side to side chasing the past. Consuming at the camera's own rate keeps the
+        queue empty regardless of fps or USB path."""
+        self._frame_lock = threading.Condition()
+        self._latest_frame = None
+        self._latest_seq = 0
+        self._returned_seq = 0
+        self._reader_stop = False
+
+        def _reader():
+            while not self._reader_stop:
+                ok, frame = self.cap.read()
+                if not ok or frame is None:
+                    time.sleep(0.005)
+                    continue
+                with self._frame_lock:
+                    self._latest_frame = frame
+                    self._latest_seq += 1
+                    self._frame_lock.notify_all()
+
+        self._reader_thread = threading.Thread(target=_reader, daemon=True)
+        self._reader_thread.start()
+
     def _grab_frame(self):
-        ok, frame = self.cap.read()
+        if getattr(self, "_reader_thread", None) is not None:
+            # newest frame, waiting (briefly) for one we haven't returned yet
+            with self._frame_lock:
+                self._frame_lock.wait_for(lambda: self._latest_seq > self._returned_seq, timeout=0.5)
+                frame = self._latest_frame
+                self._returned_seq = self._latest_seq
+            ok = frame is not None
+        else:
+            ok, frame = self.cap.read()
         if not ok or frame is None:
             return None
         if frame.shape[:2] != (self._exp_h, self._exp_w):
@@ -526,6 +600,12 @@ class HardwarePlateEnv(gym.Env):
         # instead of trusting an outlier this far outside physical possibility.
         MAX_PLAUSIBLE_TILT_DEG = 30.0
         alpha_deg, beta_deg = np.degrees(alpha), np.degrees(beta)
+        # Logged by pd_balance for diagnosing tracking glitches. (A per-frame tilt-jump
+        # rejection filter was tried 2026-09-26 and reverted: it rejected real readings,
+        # the servo then corrected against a stale angle and swung the plate side to
+        # side -- 0% in circle.)
+        self.last_inner_corners = None if self.pipeline.measurements.detector.corners is None \
+            else np.array(self.pipeline.measurements.detector.corners, dtype=float).copy()
         if abs(alpha_deg) > MAX_PLAUSIBLE_TILT_DEG or abs(beta_deg) > MAX_PLAUSIBLE_TILT_DEG:
             self._bad_tilt_streak += 1
             print(f"[HardwarePlateEnv] rejecting physically implausible tilt reading "
@@ -1197,6 +1277,9 @@ class HardwarePlateEnv(gym.Env):
         except Exception:
             pass
         try:
+            if getattr(self, "_reader_thread", None) is not None:
+                self._reader_stop = True
+                self._reader_thread.join(timeout=1.0)
             if getattr(self, "cap", None) is not None:
                 self.cap.release()
         except Exception:

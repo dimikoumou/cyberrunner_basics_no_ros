@@ -1,6 +1,11 @@
 import cv2, csv
 rows=list(csv.DictReader(open("state_est/markers.csv")))
-cap=cv2.VideoCapture(0, cv2.CAP_AVFOUNDATION); cap.set(3,1920); cap.set(4,1080)
+# pick the rig camera: the first one that really delivers 1920x1080 (indices move on re-plug)
+for idx in range(4):
+    cap=cv2.VideoCapture(idx, cv2.CAP_AVFOUNDATION); cap.set(3,1920); cap.set(4,1080)
+    ok,f=cap.read()
+    if ok and f is not None and f.shape[1]==1920: break
+    cap.release()
 cv2.namedWindow("CyberRunner live (q to quit)", cv2.WINDOW_NORMAL); cv2.resizeWindow("CyberRunner live (q to quit)", 1280, 720)
 while True:
     ok,f=cap.read()

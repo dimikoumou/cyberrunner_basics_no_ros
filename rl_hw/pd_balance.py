@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 from plate_env import HardwarePlateEnv  # noqa: E402
+from goal_circle import detect_goal_circle, save_debug  # noqa: E402
 
 SNAPSHOT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pd_snapshots")
 SNAPSHOT_EVERY_S = float(os.environ.get("PD_SNAPSHOT_S", "2.0"))  # e.g. 30 for long unattended runs
@@ -76,7 +77,10 @@ KICK_MAX = 0.6          # action vector cap (3 deg); one stick held 87 s at |a|~
 KICK_START_FRAC = 0.6   # restart the ramp at 60% of the last successful breakaway kick
 KICK_HOLD_S = 0.5       # give up if still stuck this long at the cap
 KICK_LOCKOUT_S = 1.0    # after a release (2x after a give-up)
-GOAL = (-0.0078, 0.0060)  # re-measured 2026-09-26 (filled red disc, outer-edge fit)
+# The goal is detected from the red circle on the sheet at every startup
+# (goal_circle.py), so a new sheet needs no edits. These are only a reference: the
+# centre disc used on 2026-09-26. Set PD_FIXED_GOAL=1 to use them instead.
+GOAL = (-0.0078, 0.0060)
 GOAL_TOLERANCE = 0.0455
 # Direct feedback while watching this live: correcting X and Y together lets the
 # combined vector point diagonally, straight at a corner, instead of going through
@@ -110,7 +114,8 @@ def main():
     os.makedirs(LOG_DIR, exist_ok=True)
     log_path = os.path.join(LOG_DIR, time.strftime("pd_%Y%m%d_%H%M%S.csv"))
     log = open(log_path, "w")
-    log.write("t,episode,step,xb,yb,vx,vy,alpha,beta,dist,in_circle,ball_found,a0,a1,status,i0,i1,k0,k1,kicking\n")
+    log.write("t,episode,step,xb,yb,vx,vy,alpha,beta,dist,in_circle,ball_found,a0,a1,status,i0,i1,k0,k1,kicking,"
+              "c0r,c0c,c1r,c1c,c2r,c2c,c3r,c3c\n")
     print(f"logging to {log_path}")
     # max_episode_steps default (600) let one truly-stuck episode (the ledge
     # defect, see note above) burn its entire step budget on repeated futile
@@ -127,6 +132,31 @@ def main():
         fixed_goal=GOAL, goal_tolerance=GOAL_TOLERANCE, max_action_delta=0.5,
         max_episode_steps=episode_steps, allow_unstick=False,
     )
+    if os.environ.get("PD_FIXED_GOAL") == "1":
+        goal, goal_tol = GOAL, GOAL_TOLERANCE
+        print(f"using fixed goal ({goal[0]:+.4f}, {goal[1]:+.4f}) r={goal_tol:.4f} (PD_FIXED_GOAL=1)")
+    else:
+        # Level the plate first (closed loop): the cached startup posture can leave it
+        # several degrees tilted, which rolls the ball away and gives a moving pose.
+        env._level_plate()
+        try:
+            res = detect_goal_circle(env)
+        except RuntimeError as e:
+            env.close()
+            log.close()
+            sys.exit(f"could not find the goal circle on the sheet: {e}")
+        goal, goal_tol = res["center"], res["radius"]
+        save_debug(res, os.path.join(LOG_DIR, os.path.basename(log_path).replace(".csv", "_goal.jpg")))
+        print(f"goal circle detected: centre ({goal[0]:+.4f}, {goal[1]:+.4f}) m, radius {goal_tol * 1000:.1f} mm "
+              f"(median of {res['n_frames']} frames, spread {res['spread_m'] * 1000:.1f} mm)")
+    env.fixed_goal = goal
+    env.goal_tolerance = goal_tol
+    # Edge guard only where the ball is past the wall threshold AND further out than
+    # the goal disc on that side -- a disc drawn near an edge stays reachable.
+    edge_x = max(EDGE_X, abs(goal[0]) + goal_tol)
+    edge_y = max(EDGE_Y, abs(goal[1]) + goal_tol)
+    if edge_x > EDGE_X or edge_y > EDGE_Y:
+        print(f"goal is near an edge: edge guard moved out to |x|>{edge_x:.3f}, |y|>{edge_y:.3f}")
     t_start = time.time()
     integ = np.zeros(2)
     pos_buf = deque(maxlen=STUCK_WIN)
@@ -211,9 +241,9 @@ def main():
                 # goal-seeking above. Without this the combined X+Y correction can
                 # point diagonally at a corner instead of cutting back through the
                 # middle of the edge it's near.
-                if abs(xb) > EDGE_X:
+                if abs(xb) > edge_x:
                     action[0] = -1.0 if xb > 0 else 1.0
-                if abs(yb) > EDGE_Y:
+                if abs(yb) > edge_y:
                     action[1] = -1.0 if yb > 0 else 1.0
                 # A dedicated trap-zone override was tried here (both a steady
                 # push and an in-loop oscillation toward the goal) and REMOVED --
@@ -233,7 +263,7 @@ def main():
                 # step()'s not-found grace frames obs holds the frozen last position.
                 ball_found = bool(info.get("ball_found", True))
                 last_found = ball_found
-                in_circle = ball_found and dist < GOAL_TOLERANCE
+                in_circle = ball_found and dist < goal_tol
                 ep_in_circle += int(in_circle)
                 ep_steps += 1
 
@@ -250,7 +280,9 @@ def main():
                 log.write(f"{now - t_start:.3f},{episode},{i},{obs[0]:.5f},{obs[1]:.5f},{obs[2]:.4f},"
                           f"{obs[3]:.4f},{obs[4]:.5f},{obs[5]:.5f},{dist:.5f},{int(in_circle)},{int(ball_found)},"
                           f"{action[0]:.3f},{action[1]:.3f},{info['status']},"
-                          f"{integ[0]:.4f},{integ[1]:.4f},{kick[0]:.4f},{kick[1]:.4f},{int(kicking)}\n")
+                          f"{integ[0]:.4f},{integ[1]:.4f},{kick[0]:.4f},{kick[1]:.4f},{int(kicking)},"
+                          + (",".join(f"{v:.1f}" for v in env.last_inner_corners.ravel())
+                             if getattr(env, "last_inner_corners", None) is not None else ",,,,,,,") + "\n")
 
                 if now - last_snapshot >= SNAPSHOT_EVERY_S:
                     frame = env._grab_frame()

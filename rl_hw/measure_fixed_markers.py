@@ -61,7 +61,9 @@ def main():
     ph = dxl.PacketHandler(2.0)
     port.openPort()
     port.setBaudRate(1000000)
-    cap, _, _ = init_capture("CAM", 0, None, None)
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from plate_env import _find_rig_camera
+    cap, _, _ = init_capture("CAM", _find_rig_camera(), None, None)
     t0 = time.time()
     while time.time() - t0 < 2.0:
         cap.read()
