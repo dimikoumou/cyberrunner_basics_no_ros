@@ -139,6 +139,22 @@ current physical state.
 - **Progression (one change at a time):** 0 s (axes swapped, open-loop ticks) → 2.11 s (closed loop + axis fix + level offset) → 4.84 s (offset refit) → 9.15 s (integral term) → 10.03 s (ball hue 104→108, which removed ball-lost resets on the red disc).
 - **Anything odd:** the true level point moves 0.3–0.5° between runs; the integral term absorbs it, and the x integral often sits near its cap. Velocity is computed with dt = 1/55 s while the loop runs at ~21 Hz, so the effective D gain is ~2.4× nominal (a ~1.45 Hz near-goal oscillation remains). Violent shake removed; a lost ball is recovered with gentle tilts. In-circle fraction on the success run was 52%, so a 10 s hold is not yet reliable.
 
+### Phase 3 – follow-up: ball resting in the middle (same day)
+
+- **Result:** once settled (~30–40 s after start), the ball rests at the centre of the disc. Median distance **2.6 mm**, max 3.8 mm over the remaining ~4 min, longest continuous hold **260 s**, 98.6% in circle (`pd_20260926_152636.csv`).
+- **Changes in order, one per run, each chosen by a log-analysis workflow (analysts + skeptic):**
+
+  | Change | Median dist | In circle | Longest hold |
+  |---|---|---|---|
+  | Starting point | 45 mm | 52% | 10 s |
+  | Velocity from the real frame dt instead of 1/55 s (the D term was 2.4× inflated) | 26.6 mm | 88% | 13.8 s |
+  | Tilt-servo gain 0.5 → 0.25 (0.5 was above its stability limit: ±5° plate shake at 2 Hz) | 19.6 mm | — | 89 s |
+  | Stick-slip handling (below) | 4.4 mm | 99.4% | — |
+  | `R_DONE` 5 → 8 mm (a resting ball was being kicked on noise) | **2.6 mm** | 98.6% | 260 s |
+
+  The stick-slip handling: a still ball sinks into the paper and needs ~1.5–2.4° to break free. Now the integral learns only while the ball rolls; a separate ramp "kick" breaks it free and is dropped the moment it moves.
+- **Tried and reverted:** `I_MAX` 0.3 → 0.6 caused stick-slip overshoots (in circle fell to 76.8%).
+
 ## Results summary
 
 | Task | Result |

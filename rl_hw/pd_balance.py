@@ -21,6 +21,7 @@ Usage:
 import sys
 import os
 import time
+from collections import deque
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cv2  # noqa: E402
@@ -28,7 +29,7 @@ import numpy as np  # noqa: E402
 from plate_env import HardwarePlateEnv  # noqa: E402
 
 SNAPSHOT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pd_snapshots")
-SNAPSHOT_EVERY_S = 2.0
+SNAPSHOT_EVERY_S = float(os.environ.get("PD_SNAPSHOT_S", "2.0"))  # e.g. 30 for long unattended runs
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pd_logs")
 # Success criterion (Phase 3): ball held continuously inside the goal circle for
 # this long, measured in wall-clock seconds, not steps -- the real step rate is
@@ -58,6 +59,23 @@ GAIN_BLEND_WIDTH = 0.05  # over this much additional distance
 KI = 1.0
 I_ZONE = 0.10
 I_MAX = 0.3  # 0.6 tried 2026-09-26: stick-slip (ball stuck ~1.5-2deg breakaway, then 50-80mm overshoot), in-circle 88.8% -> 76.8%; reverted
+# 2026-09-26 ramp-kick & release (design panel + judge on the logs): on bare paper
+# a still ball sinks into a slight dimple -> static breakaway ~1.5-2.4deg >> rolling
+# ~0.3-0.6deg. With a plain integral the stored push was never released after
+# breakaway (action unchanged 10 frames later), so the ball rolled through the goal
+# and re-stuck 60-80mm away. Now: the integral learns only while the ball rolls;
+# a separate kick ramps toward the goal while it is stuck and is dumped the moment
+# the ball moves. Stuck is detected from POSITION (logged speed of a still ball is
+# 7-16 mm/s, useless as a stillness test).
+STUCK_WIN = 15          # frames (~0.66 s) for the stationarity test
+STUCK_PTP = 0.0015      # m, per-axis position range => stationary (rest noise ptp <= 1.4 mm)
+BREAK_DISP = 0.002      # m from anchor => broke free -> dump kick
+R_DONE = 0.008          # m, stationary this close = success, never kick (0.005: a ball resting at 4.5 mm crossed it on noise and got kicked out 33 mm)
+KICK_RATE = 0.6         # action/s (3 deg/s) ramp along the unit vector to the goal
+KICK_MAX = 0.6          # action vector cap (3 deg); one stick held 87 s at |a|~0.47
+KICK_START_FRAC = 0.6   # restart the ramp at 60% of the last successful breakaway kick
+KICK_HOLD_S = 0.5       # give up if still stuck this long at the cap
+KICK_LOCKOUT_S = 1.0    # after a release (2x after a give-up)
 GOAL = (-0.0078, 0.0060)  # re-measured 2026-09-26 (filled red disc, outer-edge fit)
 GOAL_TOLERANCE = 0.0455
 # Direct feedback while watching this live: correcting X and Y together lets the
@@ -92,7 +110,7 @@ def main():
     os.makedirs(LOG_DIR, exist_ok=True)
     log_path = os.path.join(LOG_DIR, time.strftime("pd_%Y%m%d_%H%M%S.csv"))
     log = open(log_path, "w")
-    log.write("t,episode,step,xb,yb,vx,vy,alpha,beta,dist,in_circle,ball_found,a0,a1,status\n")
+    log.write("t,episode,step,xb,yb,vx,vy,alpha,beta,dist,in_circle,ball_found,a0,a1,status,i0,i1,k0,k1,kicking\n")
     print(f"logging to {log_path}")
     # max_episode_steps default (600) let one truly-stuck episode (the ledge
     # defect, see note above) burn its entire step budget on repeated futile
@@ -111,6 +129,14 @@ def main():
     )
     t_start = time.time()
     integ = np.zeros(2)
+    pos_buf = deque(maxlen=STUCK_WIN)
+    kick = np.zeros(2)
+    kicking = False
+    anchor = None
+    cap_t = None
+    lockout_until = 0.0
+    brk_mag = 0.0
+    last_found = True
     t_prev = None
     best_hold = 0.0
     hold_start = None
@@ -124,6 +150,9 @@ def main():
             episode += 1
             print(f"\n=== episode {episode} ===")
             obs, info = env.reset()
+            pos_buf.clear()
+            kick[:] = 0
+            kicking, anchor, cap_t, last_found = False, None, None, True
             ep_in_circle = 0
             ep_steps = 0
             for i in range(total_steps - total_taken):
@@ -140,10 +169,41 @@ def main():
                 t_now = time.time()
                 dt_real = 0.0 if t_prev is None else min(t_now - t_prev, 0.2)
                 t_prev = t_now
-                if dist_now < I_ZONE:
-                    integ = np.clip(integ + KI * np.array([gx, gy]) * dt_real, -I_MAX, I_MAX)
+                e = np.array([gx, gy])
+                stationary = False
+                if last_found:  # frozen obs during not-found frames must not read as "still"
+                    pos_buf.append((xb, yb))
+                    P = np.array(pos_buf)
+                    stationary = (len(P) == STUCK_WIN and np.ptp(P[:, 0]) < STUCK_PTP
+                                  and np.ptp(P[:, 1]) < STUCK_PTP)
+                    if kicking:
+                        if dist_now >= I_ZONE or np.hypot(xb - anchor[0], yb - anchor[1]) > BREAK_DISP:
+                            if dist_now < I_ZONE:
+                                brk_mag = float(np.hypot(*kick))  # what broke it free
+                            kicking = False
+                            kick[:] = 0
+                            pos_buf.clear()
+                            lockout_until = t_now + KICK_LOCKOUT_S
+                        else:
+                            kick += e / max(dist_now, 1e-6) * KICK_RATE * dt_real
+                            n = float(np.hypot(*kick))
+                            if n >= KICK_MAX:
+                                kick *= KICK_MAX / n
+                                cap_t = cap_t or t_now
+                                if t_now - cap_t > KICK_HOLD_S:
+                                    kicking = False
+                                    kick[:] = 0
+                                    pos_buf.clear()
+                                    lockout_until = t_now + 2 * KICK_LOCKOUT_S
+                    elif stationary and R_DONE < dist_now < I_ZONE and t_now >= lockout_until:
+                        kicking, anchor, cap_t = True, P.mean(0), None
+                        kick = KICK_START_FRAC * brk_mag * e / max(dist_now, 1e-6)
+                # the integral learns the level bias only from a rolling ball, never stiction
+                if dist_now < I_ZONE and not kicking and not stationary:
+                    integ = np.clip(integ + KI * e * dt_real, -I_MAX, I_MAX)
                 action = np.clip(
-                    np.array([kp * gx - kd * vx + integ[0], kp * gy - kd * vy + integ[1]], dtype=np.float32),
+                    np.array([kp * gx - kd * vx + integ[0] + kick[0],
+                              kp * gy - kd * vy + integ[1] + kick[1]], dtype=np.float32),
                     -0.8, 0.8,
                 )
                 # Hard override once near an edge -- full brake straight back toward
@@ -172,6 +232,7 @@ def main():
                 # Only a frame where the ball was actually detected counts: during
                 # step()'s not-found grace frames obs holds the frozen last position.
                 ball_found = bool(info.get("ball_found", True))
+                last_found = ball_found
                 in_circle = ball_found and dist < GOAL_TOLERANCE
                 ep_in_circle += int(in_circle)
                 ep_steps += 1
@@ -188,7 +249,8 @@ def main():
                     hold_start = None
                 log.write(f"{now - t_start:.3f},{episode},{i},{obs[0]:.5f},{obs[1]:.5f},{obs[2]:.4f},"
                           f"{obs[3]:.4f},{obs[4]:.5f},{obs[5]:.5f},{dist:.5f},{int(in_circle)},{int(ball_found)},"
-                          f"{action[0]:.3f},{action[1]:.3f},{info['status']}\n")
+                          f"{action[0]:.3f},{action[1]:.3f},{info['status']},"
+                          f"{integ[0]:.4f},{integ[1]:.4f},{kick[0]:.4f},{kick[1]:.4f},{int(kicking)}\n")
 
                 if now - last_snapshot >= SNAPSHOT_EVERY_S:
                     frame = env._grab_frame()
@@ -200,7 +262,7 @@ def main():
                 if i % 10 == 0 or info["status"] not in ("running", "in_circle"):
                     print(f"  step {i:4d}: xb={obs[0]:+.4f} yb={obs[1]:+.4f} dist={dist:.4f} "
                           f"{'IN' if in_circle else '  '}  action=({action[0]:+.2f},{action[1]:+.2f})  "
-                          f"I=({integ[0]:+.3f},{integ[1]:+.3f})  "
+                          f"I=({integ[0]:+.3f},{integ[1]:+.3f}) K=({kick[0]:+.2f},{kick[1]:+.2f}){'*' if kicking else ''}  "
                           f"status={info['status']}")
                 if hold_target > 0 and best_hold >= hold_target:
                     print(f"  reached {hold_target:.0f}s continuous hold -- stopping")
