@@ -118,6 +118,13 @@ TILT_GAIN = 0.15                       # per-step correction. 0.5 shook the plat
 MAX_TICKS_PER_STEP = 250
 TICK_BOUNDS = {1: (1800, 3900), 3: (700, 3800)}  # where each axis's angle plateaus (measured)
 LEVEL_TOL_DEG = 0.4
+# Delay-aligned correction (research workflow 2026-09-26, Smith-predictor idea):
+# the camera tilt is 4 (alpha) / 5 (beta) steps old at the ~29 Hz loop (lag from
+# cross-correlation of command vs measured tilt), so comparing it with the CURRENT
+# target re-corrected every target change on top of the feedforward -- a -0.9deg
+# brake command reached the plate as -2.1..-2.4deg and reversed the ball. Compare
+# each measurement with the target that was active when that frame was taken.
+TILT_MEAS_DELAY_STEPS = {1: 4, 3: 5}
 # Camera-frame angle at which the ball does NOT accelerate, i.e. true gravity level
 # expressed in the camera's (outer-frame) world frame. Estimated 2026-09-26 by
 # regressing ball acceleration on measured tilt over a whole PD run
@@ -256,6 +263,7 @@ class HardwarePlateEnv(gym.Env):
         self._cmd_ticks = {}           # last commanded goal position per motor (tilt_control)
         self._tilt_target = LEVEL_OFFSET_DEG  # last target (alpha, beta) in degrees
         self._meas_tilt = None          # last plausible measured (alpha, beta) in degrees
+        self._target_hist = []          # recent (alpha, beta) targets, newest last
         self._last_commanded_action = np.zeros(2, dtype=np.float32)
         self._pos_history = []
         self._action_history = []
@@ -647,9 +655,13 @@ class HardwarePlateEnv(gym.Env):
         target = (-action[1] * TILT_MAX_DEG + LEVEL_OFFSET_DEG[0],
                   action[0] * TILT_MAX_DEG + LEVEL_OFFSET_DEG[1])  # (alpha, beta)
         meas = self._meas_tilt if self._meas_tilt is not None else self._tilt_target
+        self._target_hist.append(target)
+        self._target_hist = self._target_hist[-12:]
         for i, dxl_id in enumerate(DXL_IDS):
             tpd = TICKS_PER_DEG[dxl_id]
-            delta = (target[i] - self._tilt_target[i]) * tpd + TILT_GAIN * (target[i] - meas[i]) * tpd
+            d = min(TILT_MEAS_DELAY_STEPS[dxl_id], len(self._target_hist) - 1)
+            target_then = self._target_hist[-1 - d][i]
+            delta = (target[i] - self._tilt_target[i]) * tpd + TILT_GAIN * (target_then - meas[i]) * tpd
             delta = float(np.clip(delta, -MAX_TICKS_PER_STEP, MAX_TICKS_PER_STEP))
             lo, hi = TICK_BOUNDS[dxl_id]
             pos = int(np.clip(self._cmd_ticks.get(dxl_id, (lo + hi) // 2) + delta, lo, hi))
