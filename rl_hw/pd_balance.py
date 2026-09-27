@@ -276,6 +276,20 @@ def _single_instance_or_exit():
     _INSTANCE_LOCK.flush()
 
 
+LOST_ALERT_S = float(os.environ.get("PD_LOST_ALERT_S", "20"))
+
+
+def _alert(msg):
+    """Tell the user: a line in the log ("ALERT: ...", watched by the Claude session for
+    phone pushes) + a macOS desktop notification with sound."""
+    print(f"ALERT: {msg}", flush=True)
+    try:
+        import subprocess
+        subprocess.Popen(["osascript", "-e", f'display notification "{msg}" with title "CyberRunner" sound name "Glass"'])
+    except OSError:
+        pass
+
+
 def _sigterm(*_):
     raise KeyboardInterrupt   # a plain `kill` (or a background run, where Ctrl-C is ignored) shuts down cleanly
 
@@ -501,6 +515,7 @@ def main():
             ok = (found and abs(xr) < env._x_half - 0.003 and abs(yr) < env._y_half - 0.003
                   and near_hole(holes, (xr, yr), extra=-HOLE_MARGIN_M) is None)
             seen = seen + 1 if ok else 0
+            track_lost(found)
             elevator.poll()
             if ui is not None:
                 ui.set_state(**elevator.state(), ball=[float(xr), float(yr)] if found else None,
@@ -530,6 +545,21 @@ def main():
 
     xb = yb = 0.0
     lost_xy = None
+    lost_since, lost_alerted = None, False
+
+    def track_lost(found):
+        """alert once when the ball has been out of sight for LOST_ALERT_S"""
+        nonlocal lost_since, lost_alerted
+        now_ = time.time()
+        if found:
+            if lost_alerted:
+                _alert(f"ball found again after {now_ - lost_since:.0f} s")
+            lost_since, lost_alerted = None, False
+            return
+        lost_since = lost_since or now_
+        if not lost_alerted and now_ - lost_since >= LOST_ALERT_S:
+            lost_alerted = True
+            _alert(f"ball not found for {LOST_ALERT_S:.0f} s -- it may be stuck under the plate")
     goal_cands = []
     last_goal_check = 0.0
     n_goal_changes = 0
@@ -1017,6 +1047,7 @@ def main():
                 # step()'s not-found grace frames obs holds the frozen last position.
                 ball_found = bool(info.get("ball_found", True))
                 last_found = ball_found
+                track_lost(ball_found)
                 if mode in ("line", "path") and follower is not None:
                     in_circle = ball_found and line_off is not None and line_off < LINE_TOL * 1.25
                 elif goal_polygon is not None and len(goal_polygon) >= 3:
