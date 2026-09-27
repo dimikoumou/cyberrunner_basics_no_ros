@@ -254,7 +254,18 @@ noise).
 Before v6, pure ODIL (v4) reached 22/31 targets and 7/11 on the tape; RL alone 21/25 and 4/8 —
 the tape (different friction) is where a controller without error memory fails.
 
-RIG_JERK_PLACEHOLDER
+**Smoothness on the rig** (second round, 40 trips, jerk = mean squared change of the applied
+command per step, as in the simulator; one RL trip lost to the hole):
+
+| Setup | Reached | Time to reach | Inside after | Final distance | Jerk (mean) |
+|---|---|---|---|---|---|
+| Classic | 10/10 | 1.8 s | 82 % | 6.0 mm | 0.0074 |
+| RL + settle | 9/9 | 1.2 s | 77 % | 6.1 mm | 0.0074 |
+| **ODIL v6 + fc (pure)** | 10/10 | 1.6 s | 70 % | 7.8 mm | **0.0039** |
+| **ODIL v6 + fc + settle** | 10/10 | 1.6 s | **87 %** | 6.0 mm | 0.0059 |
+
+Pure ODIL moves the plate about **half as jerkily** as the classic controller or RL + settle,
+and ODIL + settle had the best time-in-target of this round. (10 trips per setup: indicative.)
 
 ## 9. Recommended next steps
 
