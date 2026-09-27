@@ -223,8 +223,8 @@ VIA_REACH = 0.02                       # this close to a via point -> head for t
 RELOAD_TIMEOUT_S = 90.0                # ball lost near a hole: run the elevator this long at most
 RELOAD_TIMEOUT_OTHER_S = 15.0          # lost elsewhere (e.g. hidden in a corner): shorter, then the gentle recovery
 RELOAD_UNITS = int(os.environ.get("PD_RELOAD_UNITS", "328"))      # elevator speed for a reload (~75 rpm)
-UNJAM_AFTER_S = 10.0                   # ball not back this long -> it is caught inside: unjam, then every 10 s
-UNJAM_TILT = 0.8                       # slow full tilt (action units, 4 deg) toward each side in turn
+UNJAM_AFTER_S = 10.0                   # ball not back this long -> it is caught under the board: unjam, then every 10 s
+UNJAM_TILT = 1.0                       # slow full tilt (action units, 5 deg) toward each side in turn, held
 RELOAD_SEEN_FRAMES = 5                 # ball visible on the paper this many frames in a row = reloaded
 GOAL_TOLERANCE = 0.0455
 # Direct feedback while watching this live: correcting X and Y together lets the
@@ -478,19 +478,16 @@ def main():
         tilt_dirs = [np.array(d, dtype=np.float32) for d in ((1, 0), (0, 1), (-1, 0), (0, -1))]
         while time.time() - t0 < timeout:
             if timeout >= RELOAD_TIMEOUT_S and time.time() - t0 > next_unjam and elevator.on:
-                # caught inside the frame / return channel: back the elevator off for 1 s,
-                # then forward again, while the board tilts slowly to one side (ramped, no jolt)
+                # caught under the board on its way to the elevator: tilt the whole board
+                # slowly to one side (ramped over 1 s, no jolt) and hold, so it rolls on
                 d = tilt_dirs[n_unjam % 4]
                 n_unjam += 1
-                print(f"  ball not back after {time.time() - t0:.0f} s -- unjam {n_unjam}: elevator reverse 1 s, "
-                      f"slow tilt {tuple(d)}")
-                elevator._w4(104, -elevator.units)
+                print(f"  ball not back after {time.time() - t0:.0f} s -- unjam {n_unjam}: slow tilt {tuple(d)}")
                 for k in range(1, 21):
                     env._write_action(d * UNJAM_TILT * k / 20)
                     time.sleep(0.05)
-                elevator._w4(104, elevator.units)
                 t_hold = time.time()
-                while time.time() - t_hold < 2.0:
+                while time.time() - t_hold < 2.5:
                     env._read_state()
                     time.sleep(0.03)
                 for k in range(19, -1, -1):
