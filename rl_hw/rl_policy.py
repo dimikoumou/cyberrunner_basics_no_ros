@@ -79,12 +79,14 @@ class ODILRigController:
         self.z = np.zeros(2)
         self._t_prev = None
 
-    def action(self, goal, pos, vel, dt=None):
+    def action(self, goal, pos, vel, dt=None, radius=0.012):
         rel = np.asarray(goal) - np.asarray(pos)
         feat = np.concatenate([rel / 0.1, np.asarray(vel) / 0.1, self.th / 5.0, self.thl / 5.0])
-        if self.n_in == 10:
+        if self.n_in >= 10:
             self.z += (rel / self.z_scale - self.z / self.tz) * (dt or self.DT)
             feat = np.concatenate([feat, self.z])
+        if self.n_in == 11:                              # v7: target radius
+            feat = np.concatenate([feat, [radius / 0.03]])
         h = feat
         for i, (W, b) in enumerate(self.layers):
             h = W @ h + b

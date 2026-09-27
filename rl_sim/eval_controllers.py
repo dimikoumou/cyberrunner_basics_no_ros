@@ -66,9 +66,11 @@ class ODILController:
         self.th += (applied_deg - self.th) * DT / self.TAU
         self.thl += (self.th - self.thl) * DT / self.TAU
         feat = np.concatenate([rel / 0.1, v / 0.1, self.th / 5.0, self.thl / 5.0])
-        if self.n_in == 10:
+        if self.n_in >= 10:
             self.z += (rel / self.z_scale - self.z / self.tz) * DT
             feat = np.concatenate([feat, self.z])
+        if self.n_in == 11:
+            feat = np.concatenate([feat, [obs[8]]])            # target radius / 0.03 (build_obs)
         u_deg = 5.0 * 0.8 * np.tanh(self.net(feat))
         return np.clip(u_deg / 5.0 / ACTION_SCALE, -1, 1)   # env multiplies by ACTION_SCALE
 

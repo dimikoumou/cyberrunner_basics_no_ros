@@ -1037,7 +1037,8 @@ def main():
                         print(f"  hybrid: ball {dist_now * 1000:.0f} mm out -> policy approach")
                     if policy_driving:
                         if use_odil:
-                            action = odil_ctrl.action(goal, (xb, yb), (vx, vy), dt_real if dt_real > 0 else None).astype(np.float32)
+                            action = odil_ctrl.action(goal, (xb, yb), (vx, vy), dt_real if dt_real > 0 else None,
+                                                      goal_tol).astype(np.float32)
                         else:
                             action = rl_ctrl.action(goal, goal_tol, (xb, yb), (vx, vy), alpha, beta).astype(np.float32)
                         move, move_request, phase, kick = None, False, "idle", np.zeros(2)
