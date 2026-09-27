@@ -32,7 +32,7 @@ from goal_circle import (detect_goal_circle, detect_on_frame, save_debug, save_l
                          pixel_to_plate, inside_region)
 from ui_server import UIServer, FRAME_W, FRAME_H  # noqa: E402
 from line_path import detect_line, PathTracker  # noqa: E402
-from rl_policy import RigPolicyController  # noqa: E402
+from rl_policy import RigPolicyController, ODILRigController  # noqa: E402
 from elevator import Elevator  # noqa: E402
 from plate_env import LEVEL_OFFSET_DEG  # noqa: E402
 
@@ -311,6 +311,15 @@ def main():
     rl_ctrl = RigPolicyController(policy_path, LEVEL_OFFSET_DEG) if os.path.exists(policy_path) else None
     use_policy = bool(os.environ.get("PD_POLICY")) and rl_ctrl is not None
     policy_driving = True     # within the hybrid: True = policy approach, False = classic near field
+    # ODIL controller (rl_sim/odil_plate.py): PD_ODIL=<odil_policy.npz> or UI toggle; PD_HYBRID=0 disables
+    # the classic near-field settle for both learned controllers (pure policy all the way in)
+    odil_path = os.environ.get("PD_ODIL") or os.path.abspath(os.path.join(
+        os.path.dirname(__file__), "..", "rl_sim", "runs", "odil_best", "odil_policy.npz"))
+    odil_ctrl = ODILRigController(odil_path) if os.path.exists(odil_path) else None
+    use_odil = bool(os.environ.get("PD_ODIL")) and odil_ctrl is not None
+    hybrid = os.environ.get("PD_HYBRID", "1") == "1"
+    if odil_ctrl is not None:
+        print(f"ODIL policy available: {odil_path}" + (" (ACTIVE)" if use_odil else ""))
     if rl_ctrl is not None:
         print(f"learned policy available: {policy_path}" + (" (ACTIVE)" if use_policy else ""))
     move, move_request, n_moves = None, False, 0
@@ -483,15 +492,23 @@ def main():
                                 elevator.set_speed(c.get("units"), c.get("dir"))
                             ui.set_state(**elevator.state())
                         elif kind == "controller":
-                            want = c.get("which") == "learned"
-                            if want and rl_ctrl is None:
+                            which = c.get("which")
+                            if which == "learned" and rl_ctrl is None:
                                 print("no trained policy found -- staying on the classic controller")
+                            elif which == "odil" and odil_ctrl is None:
+                                print("no ODIL policy found -- staying on the current controller")
                             else:
-                                use_policy = want
-                                if rl_ctrl is not None:
-                                    rl_ctrl.reset()
+                                use_policy = which == "learned"
+                                use_odil = which == "odil"
+                                for ctl in (rl_ctrl, odil_ctrl):
+                                    if ctl is not None:
+                                        ctl.reset()
+                                policy_driving = True
                                 move, phase, kick = None, "idle", np.zeros(2)
-                            ui.set_state(controller="learned" if use_policy else "classic")
+                            ui.set_state(controller="odil" if use_odil else ("learned" if use_policy else "classic"))
+                        elif kind == "hybrid":
+                            hybrid = bool(c.get("on"))
+                            policy_driving = True
                         elif kind == "mode" and c.get("mode") in ("sheet", "click", "line", "path"):
                             mode = c["mode"]
                             live_goal = mode == "sheet"
@@ -682,7 +699,7 @@ def main():
                     kick = np.zeros(2)
                 kicking = phase != "idle"
                 # the integral learns the level bias only from a rolling ball, never stiction
-                if (running and move is None and not line_active and not (use_policy and policy_driving)
+                if (running and move is None and not line_active and not ((use_policy or use_odil) and policy_driving)
                         and dist_now < I_ZONE and not kicking and not stationary):
                     integ = np.clip(integ + KI * e * dt_real, -I_MAX, I_MAX)
                 v_ref = (kp / kd) * e
@@ -771,19 +788,26 @@ def main():
                 # _attempt_unstick(), which is the only thing that has ever
                 # actually freed the ball from this specific spot. Let the wedge
                 # detector fire and do its job instead of masking it.
-                if use_policy and running and mode not in ("line", "path"):
+                if (use_policy or use_odil) and running and mode not in ("line", "path"):
                     handover = max(HANDOVER_MIN, HANDOVER_R_SCALE * goal_tol)
-                    if policy_driving and dist_now < handover:
+                    if not hybrid:
+                        policy_driving = True
+                    elif policy_driving and dist_now < handover:
                         policy_driving = False
                         move, move_request, phase = None, False, "idle"
                         pos_buf.clear()
                         print(f"  hybrid: near field at {dist_now * 1000:.0f} mm -> classic settle")
                     elif not policy_driving and dist_now > HANDBACK_SCALE * handover:
                         policy_driving = True
-                        rl_ctrl.reset()
+                        for ctl in (rl_ctrl, odil_ctrl):
+                            if ctl is not None:
+                                ctl.reset()
                         print(f"  hybrid: ball {dist_now * 1000:.0f} mm out -> policy approach")
                     if policy_driving:
-                        action = rl_ctrl.action(goal, goal_tol, (xb, yb), (vx, vy), alpha, beta).astype(np.float32)
+                        if use_odil:
+                            action = odil_ctrl.action(goal, (xb, yb), (vx, vy)).astype(np.float32)
+                        else:
+                            action = rl_ctrl.action(goal, goal_tol, (xb, yb), (vx, vy), alpha, beta).astype(np.float32)
                         move, move_request, phase, kick = None, False, "idle", np.zeros(2)
                 if not running:
                     action = np.zeros(2, dtype=np.float32)   # stopped: hold the plate level
@@ -791,6 +815,8 @@ def main():
                 obs, reward, terminated, truncated, info = env.step(action)
                 if rl_ctrl is not None:
                     rl_ctrl.record_applied(env._last_commanded_action)
+                if odil_ctrl is not None:
+                    odil_ctrl.record_applied(env._last_commanded_action, dt_real if dt_real > 0 else None)
                 dist = float(np.hypot(obs[6], obs[7]))
                 # Only a frame where the ball was actually detected counts: during
                 # step()'s not-found grace frames obs holds the frozen last position.
@@ -835,7 +861,8 @@ def main():
                     elevator.poll()
                     ui.set_state(**elevator.state())
                 if ui is not None:
-                    ui.set_state(controller=("learned" if policy_driving else "learned+classic settle") if use_policy else "classic",
+                    ui.set_state(controller=(("odil" if use_odil else "learned") + ("" if policy_driving else "+classic settle"))
+                                 if (use_policy or use_odil) else "classic", hybrid=hybrid,
                                  running=running, mode=mode,
                                  ball=[float(obs[0]), float(obs[1])] if ball_found else None,
                                  goal=[goal[0], goal[1]], goal_r=goal_tol,

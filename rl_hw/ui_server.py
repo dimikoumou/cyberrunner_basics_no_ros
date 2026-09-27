@@ -91,7 +91,11 @@ PAGE = """<!doctype html>
         <div class="row">
           <button id="c_classic">Classic</button>
           <button id="c_learned">Learned (RL)</button>
+          <button id="c_odil">ODIL</button>
         </div>
+        <label style="display:block;margin-top:8px;font-size:13px;color:var(--muted)">
+          <input type="checkbox" id="c_hybrid" checked> classic settle near the target (hybrid)
+        </label>
       </div>
       <div class="panel">
         <h2>Ball elevator</h2>
@@ -155,6 +159,8 @@ $('e_dir').onclick = () => {
 };
 $('c_classic').onclick = () => cmd({cmd:'controller', which:'classic'});
 $('c_learned').onclick = () => cmd({cmd:'controller', which:'learned'});
+$('c_odil').onclick = () => cmd({cmd:'controller', which:'odil'});
+$('c_hybrid').onchange = () => cmd({cmd:'hybrid', on:$('c_hybrid').checked});
 $('cam').addEventListener('click', ev => {
   const r = ev.target.getBoundingClientRect();
   cmd({cmd:'click', u:(ev.clientX - r.left) / r.width, v:(ev.clientY - r.top) / r.height});
@@ -172,6 +178,8 @@ async function poll() {
     $('pathrow').style.display = s.mode === 'path' ? 'flex' : 'none';
     $('c_classic').classList.toggle('on', s.controller !== 'learned');
     $('c_learned').classList.toggle('on', (s.controller || '').startsWith('learned'));
+    $('c_odil').classList.toggle('on', (s.controller || '').startsWith('odil'));
+    if (s.hybrid !== undefined) $('c_hybrid').checked = s.hybrid;
     $('s_ball').textContent = s.ball ? `(${mm(s.ball[0])}, ${mm(s.ball[1])})` : 'not visible';
     $('s_goal').textContent = s.goal ? `(${mm(s.goal[0])}, ${mm(s.goal[1])}), r ${mm(s.goal_r)}` : 'none';
     $('s_dist').textContent = s.dist != null ? mm(s.dist) : '–';
@@ -184,8 +192,8 @@ async function poll() {
       $('e_status').innerHTML = s.elev_on ? `<span class="ok">running</span> at ${s.elev_rpm_set} rpm${live}`
         : (s.elev_msg && s.elev_msg !== 'stopped' ? s.elev_msg : 'off') + live;
     }
-    $('s_ctrl').textContent = s.controller === 'learned' ? 'learned (approach)'
-      : s.controller === 'learned+classic settle' ? 'classic (near-field settle)' : 'classic';
+    $('s_ctrl').textContent = (s.controller || 'classic').endsWith('+classic settle') ? 'classic (near-field settle)'
+      : s.controller === 'learned' ? 'learned RL' : s.controller === 'odil' ? 'ODIL' : 'classic';
     $('hint').textContent = s.mode === 'click' ? 'Click the board to send the ball there'
       : s.mode === 'path' ? (s.line_msg || 'Click points to draw a path, then press Go')
       : s.mode === 'line' ? (s.line_msg || 'Following the red line')

@@ -5,7 +5,7 @@ cd "$(dirname "$0")/../rl_hw"
 for pair in "$@"; do
     start="${pair%%:*}"; target="${pair##*:}"
     PD_GOAL="$start,0.015" ../.venv/bin/python3 -u pd_balance.py 500 5 0 500 > /dev/null 2>&1
-    PD_POLICY="$POLICY" PD_GOAL="$target" ../.venv/bin/python3 -u pd_balance.py 800 5 0 800 > /tmp/move_run.log 2>&1; grep -E "  move |ended early|implausible ball jump" /tmp/move_run.log | head -6
+    PD_ODIL="$ODIL" PD_HYBRID="${HYBRID:-1}" PD_POLICY="$POLICY" PD_GOAL="$target" ../.venv/bin/python3 -u pd_balance.py 800 5 0 800 > /tmp/move_run.log 2>&1; grep -E "  move |ended early|implausible ball jump" /tmp/move_run.log | head -6
     F=$(ls -t pd_logs/*.csv | head -1)
     ../.venv/bin/python3 - "$F" "$pair" /tmp/move_run.log <<'PY'
 import csv, sys, numpy as np, re

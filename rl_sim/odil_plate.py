@@ -43,8 +43,17 @@ K_ACC, A_ROLL, TAU, EPS_V = 0.11, 0.025, 0.045, 0.004
 A_STATIC = K_ACC * float(os.environ.get("ODIL_STATIC_DEG", "1.6"))   # m/s^2 at ~zero speed
 V_STRIBECK = float(os.environ.get("ODIL_V_STRIBECK", "0.01"))       # m/s
 LAM0 = float(os.environ.get("ODIL_LAM0", "0.2"))
+# v3: the policy was only ever trained along its own optimal rest-to-rest paths, so in
+# the real (sticky, delayed, noisy) loop it met states it had never seen. Start states
+# now include moving balls and tilted plates, and every round draws a fresh set of pairs
+# (the policy carries over), so it learns feedback over much more of the state space.
+RANDOM_START = os.environ.get("ODIL_RANDOM_START", "0") == "1"   # v3 (on) collapsed to ~zero tilts
+RESAMPLE = os.environ.get("ODIL_RESAMPLE", "0") == "1"
+STICTION_MODEL = os.environ.get("ODIL_STICTION", "hold")
+LAM_DECAY = float(os.environ.get("ODIL_LAM_DECAY", "0.7"))
+T_MAX = float(os.environ.get("ODIL_T_MAX", "3.0"))
 U_MAX_DEG = 5.0 * 0.8
-M_PAIRS, N_PTS = 384, 41
+M_PAIRS, N_PTS = int(os.environ.get("ODIL_PAIRS", "512")), 41
 GOAL_X, GOAL_Y, START_X, START_Y = 0.09, 0.07, 0.12, 0.10
 SCALE = torch.tensor([0.1, 0.1, 0.1, 0.1, 5.0, 5.0, 5.0, 5.0])     # residual normalisation
 
@@ -65,8 +74,21 @@ class Policy(torch.nn.Module):
 def f(x, u):
     v, th, thl = x[..., 2:4], x[..., 4:6], x[..., 6:8]
     speed = torch.sqrt((v ** 2).sum(-1, keepdim=True) + EPS_V ** 2)
+    drive = K_ACC * thl
+    if STICTION_MODEL == "hold":
+        # v4: smooth STATIC friction. A slow ball is held against the drive up to A_STATIC
+        # (friction opposes the DRIVE, not the velocity), so it only starts when the tilt
+        # beats breakaway -- and at the end, level + slow = held in place. v2's Stribeck
+        # term scaled with v/|v| and vanished at rest, so the model let the ball creep
+        # from rest under tiny tilts; on the rig ODIL v2 then stalled 14-33 mm short.
+        w = torch.exp(-(speed / V_STRIBECK) ** 2)                         # 1 when slow
+        dmag = torch.sqrt((drive ** 2).sum(-1, keepdim=True) + 1e-8)
+        k = 0.02 * A_STATIC
+        held = -k * torch.log(torch.exp(-dmag / k) + torch.exp(-torch.full_like(dmag, A_STATIC) / k))  # smooth min
+        acc = drive - w * held * drive / dmag - (1 - w) * A_ROLL * v / speed
+        return torch.cat([v, acc, (u - th) / TAU, (th - thl) / TAU], -1)
     a_fric = A_ROLL + (A_STATIC - A_ROLL) * torch.exp(-(speed / V_STRIBECK) ** 2)
-    return torch.cat([v, K_ACC * thl - a_fric * v / speed, (u - th) / TAU, (th - thl) / TAU], -1)
+    return torch.cat([v, drive - a_fric * v / speed, (u - th) / TAU, (th - thl) / TAU], -1)
 
 
 def sample_pairs(rng, m):
@@ -83,26 +105,37 @@ def main():
     os.makedirs(out, exist_ok=True)
     rng = np.random.default_rng(0)
     torch.manual_seed(0)
-    s, g = sample_pairs(rng, M_PAIRS)
-    M = len(s)
-    start = torch.zeros(M, 8)
-    start[:, 0:2] = torch.tensor(s, dtype=torch.float32)
-    end = torch.zeros(M, 8)
-    end[:, 0:2] = torch.tensor(g, dtype=torch.float32)
-    goal = end[:, None, 0:2]
-    # interior trajectory points, initialised on a smooth rest-to-rest straight line
-    tt = torch.linspace(0, 1, N_PTS)[1:-1]
-    blend = (3 * tt ** 2 - 2 * tt ** 3)[None, :, None]
-    x_in = (start[:, None, :] * (1 - blend) + end[:, None, :] * blend).clone()
-    x_in[..., 2:] += 0.001 * torch.randn_like(x_in[..., 2:])
-    x_in.requires_grad_(True)
-    log_T = torch.full((M, 1), float(np.log(1.5)), requires_grad=True)
     pol = Policy()
-    opt = torch.optim.Adam([{"params": pol.parameters(), "lr": 1e-3}, {"params": [x_in, log_T], "lr": 3e-3}])
+    opt_pol = torch.optim.Adam(pol.parameters(), lr=1e-3)
     lam, mu = LAM0, 0.02
     t0 = time.time()
     hist = []
+
+    def build():
+        s, g = sample_pairs(rng, M_PAIRS)
+        m = len(s)
+        start = torch.zeros(m, 8)
+        start[:, 0:2] = torch.tensor(s, dtype=torch.float32)
+        if RANDOM_START:
+            k = torch.rand(m, 1) < 0.6                       # 60% start moving/tilted
+            start[:, 2:4] = torch.where(k, 0.1 * (2 * torch.rand(m, 2) - 1), start[:, 2:4])
+            tilt = torch.where(k, 3.0 * (2 * torch.rand(m, 2) - 1), torch.zeros(m, 2))
+            start[:, 4:6], start[:, 6:8] = tilt, tilt
+        end = torch.zeros(m, 8)
+        end[:, 0:2] = torch.tensor(g, dtype=torch.float32)
+        tt = torch.linspace(0, 1, N_PTS)[1:-1]
+        blend = (3 * tt ** 2 - 2 * tt ** 3)[None, :, None]
+        x_in = (start[:, None, :] * (1 - blend) + end[:, None, :] * blend).clone()
+        x_in[..., 2:] += 0.001 * torch.randn_like(x_in[..., 2:])
+        x_in.requires_grad_(True)
+        log_T = torch.full((m, 1), float(np.log(1.5)), requires_grad=True)
+        return start, end, x_in, log_T, torch.optim.Adam([x_in, log_T], lr=3e-3)
+
+    start, end, x_in, log_T, opt_traj = build()
     for rnd in range(6):
+        if RESAMPLE and rnd > 0:
+            start, end, x_in, log_T, opt_traj = build()
+        goal = end[:, None, 0:2]
         for it in range(iters):
             x = torch.cat([start[:, None, :], x_in, end[:, None, :]], 1)           # (M, N, 8)
             T = torch.exp(log_T)
@@ -113,16 +146,18 @@ def main():
             phys = (res ** 2).sum(-1).sum(-1).mean()
             smooth = ((u[:, 1:] - u[:, :-1]) / U_MAX_DEG).pow(2).sum(-1).sum(-1).mean()
             loss = phys * 100.0 + lam * T.mean() + mu * smooth
-            opt.zero_grad()
+            opt_pol.zero_grad()
+            opt_traj.zero_grad()
             loss.backward()
-            opt.step()
+            opt_pol.step()
+            opt_traj.step()
             with torch.no_grad():
-                log_T.clamp_(np.log(0.3), np.log(6.0))
+                log_T.clamp_(np.log(0.3), np.log(T_MAX))
         rec = dict(round=rnd, lam=lam, phys=float(phys), T_med=float(T.median()), smooth=float(smooth),
                    minutes=(time.time() - t0) / 60)
         hist.append(rec)
         print(rec, flush=True)
-        lam *= 0.5                     # continuation on the time/accuracy trade-off (as in the paper)
+        lam *= LAM_DECAY
     torch.save(pol.state_dict(), os.path.join(out, "odil_policy.pt"))
     lin = [m for m in pol.net if isinstance(m, torch.nn.Linear)]
     np.savez(os.path.join(out, "odil_policy.npz"), **{f"W{i}": l.weight.detach().numpy() for i, l in enumerate(lin)},

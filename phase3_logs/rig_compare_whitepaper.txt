@@ -1,0 +1,30 @@
+=== RL v3 (pure) ===
+0.012,-0.066:-0.079,-0.014,0.008: start 104mm | moves 1 (early end 0), hops before arrival 0, pulses 0 | arrived 1.2s | after: max 6mm, in target 100%, final 3.6mm | jerk 0.0160
+0.079,-0.075:0.074,0.029,0.012: start 103mm | moves 1 (early end 0), hops before arrival 0, pulses 0 | arrived 1.1s | after: max 14mm, in target 94%, final 3.4mm | jerk 0.0154
+0.045,-0.051:0.014,0.026,0.008: start 89mm | moves 1 (early end 0), hops before arrival 0, pulses 0 | arrived 1.1s | after: max 7mm, in target 100%, final 1.6mm | jerk 0.0160
+0.082,-0.073:-0.064,0.056,0.012: start 197mm | moves 1 (early end 0), hops before arrival 0, pulses 0 | arrived 1.3s | after: max 22mm, in target 94%, final 10.3mm | jerk 0.0157
+0.059,-0.023:-0.058,0.018,0.008: start 122mm | moves 1 (early end 0), hops before arrival 0, pulses 0 | arrived 1.4s | after: max 9mm, in target 67%, final 7.5mm | jerk 0.0158
+-0.028,0.023:0.019,-0.040,0.012: start 80mm | moves 1 (early end 0), hops before arrival 0, pulses 0 | arrived 1.0s | after: max 10mm, in target 100%, final 1.7mm | jerk 0.0152
+-0.080,-0.031:-0.045,0.028,0.008: start 72mm | moves 1 (early end 0), hops before arrival 23, pulses 0 | arrived nans | after: max nanmm, in target 0%, final 10.0mm | jerk 0.0154
+-0.032,0.029:0.076,0.023,0.012: start 103mm | moves 1 (early end 0), hops before arrival 0, pulses 0 | arrived 1.3s | after: max 9mm, in target 100%, final 3.2mm | jerk 0.0159
+=== CLASSIC ===
+0.012,-0.066:-0.079,-0.014,0.008: start 99mm | moves 1 (early end 0), hops before arrival 0, pulses 3 | arrived 1.5s | after: max 14mm, in target 82%, final 4.2mm | jerk 0.0047
+0.079,-0.075:0.074,0.029,0.012: start 108mm | moves 1 (early end 0), hops before arrival 0, pulses 1 | arrived 1.4s | after: max 9mm, in target 100%, final 2.7mm | jerk 0.0018
+0.045,-0.051:0.014,0.026,0.008: start 81mm | moves 1 (early end 0), hops before arrival 0, pulses 4 | arrived 1.1s | after: max 26mm, in target 69%, final 4.1mm | jerk 0.0041
+0.082,-0.073:-0.064,0.056,0.012: start 193mm | moves 3 (early end 0), hops before arrival 2, pulses 4 | arrived 4.1s | after: max 32mm, in target 85%, final 5.6mm | jerk 0.0065
+0.059,-0.023:-0.058,0.018,0.008: start 127mm | moves 1 (early end 1), hops before arrival 0, pulses 2 | arrived 1.4s | after: max 17mm, in target 85%, final 6.3mm | jerk 0.0029
+-0.028,0.023:0.019,-0.040,0.012: start 81mm | moves 1 (early end 0), hops before arrival 0, pulses 2 | arrived 1.0s | after: max 15mm, in target 98%, final 5.8mm | jerk 0.0024
+-0.080,-0.031:-0.045,0.028,0.008: start 67mm | moves 1 (early end 0), hops before arrival 0, pulses 1 | arrived 2.2s | after: max 12mm, in target 96%, final 5.6mm | jerk 0.0021
+-0.032,0.029:0.076,0.023,0.012: start 115mm | moves 1 (early end 0), hops before arrival 0, pulses 1 | arrived 1.3s | after: max 14mm, in target 99%, final 6.0mm | jerk 0.0024
+=== ODIL v4 trip 1 retry ===
+0.012,-0.066:-0.079,-0.014,0.008: start 105mm | moves 71 (early end 0), hops before arrival 0, pulses 0 | arrived 2.9s | after: max 21mm, in target 36%, final 20.3mm | jerk 0.0010
+Traceback (most recent call last):
+  File "<stdin>", line 3, in <module>
+IndexError: index 0 is out of bounds for axis 0 with size 0
+0.079,-0.075:0.074,0.029,0.012: start 103mm | moves 1 (early end 0), hops before arrival 0, pulses 0 | arrived 1.5s | after: max 17mm, in target 97%, final 5.8mm | jerk 0.0009
+0.045,-0.051:0.014,0.026,0.008: start 82mm | moves 1 (early end 0), hops before arrival 0, pulses 0 | arrived 1.5s | after: max 17mm, in target 57%, final 6.6mm | jerk 0.0010
+0.082,-0.073:-0.064,0.056,0.012: start 200mm | moves 8 (early end 0), hops before arrival 1, pulses 0 | arrived 4.6s | after: max 13mm, in target 4%, final 12.4mm | jerk 0.0004
+0.059,-0.023:-0.058,0.018,0.008: start 124mm | moves 1 (early end 0), hops before arrival 0, pulses 0 | arrived 1.5s | after: max 23mm, in target 5%, final 9.6mm | jerk 0.0003
+-0.028,0.023:0.019,-0.040,0.012: start 78mm | moves 1 (early end 0), hops before arrival 0, pulses 0 | arrived 1.3s | after: max 10mm, in target 100%, final 9.0mm | jerk 0.0001
+-0.080,-0.031:-0.045,0.028,0.008: start 76mm | moves 787 (early end 0), hops before arrival 22, pulses 0 | arrived nans | after: max nanmm, in target 0%, final 75.2mm | jerk 0.0001
+-0.032,0.029:0.076,0.023,0.012: start 101mm | moves 1 (early end 0), hops before arrival 0, pulses 0 | arrived 1.2s | after: max 12mm, in target 100%, final 4.5mm | jerk 0.0005
