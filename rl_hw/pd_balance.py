@@ -22,6 +22,7 @@ import sys
 import os
 import time
 import json
+import signal
 from collections import deque
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -275,8 +276,13 @@ def _single_instance_or_exit():
     _INSTANCE_LOCK.flush()
 
 
+def _sigterm(*_):
+    raise KeyboardInterrupt   # a plain `kill` (or a background run, where Ctrl-C is ignored) shuts down cleanly
+
+
 def main():
     _single_instance_or_exit()
+    signal.signal(signal.SIGTERM, _sigterm)
     total_steps = int(sys.argv[1]) if len(sys.argv) > 1 else 6000
     max_episodes = int(sys.argv[2]) if len(sys.argv) > 2 else 15
     # optional: hold target in s (0 = never stop early), episode length in steps
