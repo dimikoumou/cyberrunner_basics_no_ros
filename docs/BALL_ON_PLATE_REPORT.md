@@ -1,6 +1,6 @@
 # CyberRunner ball-on-plate — full report
 
-*Branch `ball-on-plate`, work of 2026-09-26/27. How to run everything: [`rl_hw/HOW_TO_RUN.md`](../rl_hw/HOW_TO_RUN.md).
+*Branch `ball-on-plate`, work of 2026-09-26/27 (day 2 afternoon: §8). How to run everything: [`rl_hw/HOW_TO_RUN.md`](../rl_hw/HOW_TO_RUN.md).
 Short project history in [`REPORT.md`](../REPORT.md); this document is the complete account of the
 ball-on-plate work: what was found, what worked, what failed, and why.*
 
@@ -17,7 +17,7 @@ in one smooth motion and then stays — with a web UI and a learned (RL) control
 
 | Item | Fact |
 |---|---|
-| Tilt motors | Dynamixel **IDs 1 and 3** (ID 2 = ball-reload elevator, never commanded) |
+| Tilt motors | Dynamixel **IDs 1 and 3**; ID 2 = ball-reload elevator (velocity mode, runs only while the ball is lost) |
 | Surface | Glass removed; **paper** on the frame (the old bezel ledge that trapped the ball is gone) |
 | Camera | See3CAM_24CUG, 1920×1080, processed at 640×360; **requested at 30 fps** |
 | Markers | 4 outer (fixed frame) + 4 inner (tilting plate) blue dots |
@@ -40,6 +40,9 @@ in one smooth motion and then stays — with a web UI and a learned (RL) control
 | RL simulator calibration | 1-s replay error **3.4 / 4.3 mm** at 0.5 / 1 s (baseline “stays put”: 12.9 / 20.5 mm) |
 | RL v3 in sim (200 episodes) | **92 %** reach vs **65 %** for PD; 1.00 s vs 1.34 s; 70 % vs 28 % inside afterwards |
 | RL v3 on the rig (zero-shot) | 3/3 trips: 1.2–2.2 s, no hops, 100 % in target afterwards |
+| ODIL v6 + stiction comp. in sim | **97 %** reach (RL 96 %), 69 % inside afterwards (RL 72 %), ~3× smoother than RL |
+| ODIL on the rig (pure / + settle) | **20/20** each; + settle: 1.3 s, 77 % inside, 6.1 mm — on par with RL + settle |
+| Hole + auto-reload | drop → elevator → ball back typically in 4–34 s, task resumes |
 
 ---
 
@@ -181,24 +184,83 @@ millimetres (no slope memory, can't nudge a stuck ball) and near-field jitter (a
 ## 7. Current state
 
 - **Controllers:** classic (planned moves + near-field stiction handling + learned slopes);
-  learned RL v3; **hybrid** (RL approach → classic settle) — selectable in the UI.
-- **UI modes:** red region on sheet, click to target, follow red line, draw path.
+  learned RL v3; **ODIL v6 + stiction compensation**; each learned controller optionally with the
+  **classic near-field settle** (hybrid) — selectable in the UI.
+- **UI modes:** red region on sheet, click to target, follow red line, draw path (runs in drawing
+  order), **drop into hole** test; hole & reload panel; elevator panel (speed remembered, Max);
+  green target circle for every target; view-only phone page (`rl_hw/remote_view.py`).
+- **Lost ball:** plate levelled on the camera-measured angle, elevator (ID 2) forward at 328 until
+  the ball is seen again, then off; alert (desktop + log → phone push) after 20 s.
 - **Safety/robustness:** single-instance lock, camera watchdog, glitch filter, proportional wall
-  guard, no shaking.
+  guard, no shaking; tilt servo refuses to correct on a frame with a hidden plate marker and stops
+  pushing a motor whose travel does not move the measured angle; verified elevator stop on exit.
 - **Local learned files (not in git):** `bias_table.json`, `pulse_table.json`, `last_goal.json`,
-  `last_level_position.json`. The trained policy *is* in git: `rl_sim/runs/plate_goal_v3/policy.npz`.
+  `last_level_position.json`, `holes.json`, `elevator_settings.json`. Policies in git:
+  `rl_sim/runs/plate_goal_v3/policy.npz` (RL), `rl_sim/runs/odil_best/odil_policy.npz` (ODIL v6).
 
-**Known limitations:** targets must be ≥ ~5 cm from the frame; the camera occasionally freezes
-and needs a re-plug; RL alone settles imprecisely on small targets; line tracking is looser on
-tight curves (S-line median ~13 mm off).
+**Known limitations:** targets must be ≥ ~5 cm from the frame; motor 3's link has play (its
+level point moved ~600–1000 ticks after the servo was driven into its end stop; the camera
+closed loop absorbs it, but a stored motor position is never "level"); the ball can lie still
+in the box under the plate after a hole drop (the alert catches it).
 
-## 8. Recommended next steps
+## 8. Day 2 (2026-09-27, afternoon): holes, reload, ODIL that works
 
-1. **“One motion, then stillness”:** tune the hybrid; RL v4 with reward for coming to rest in
-   the target, a learned slope memory (integral input) and more small-target training.
-2. **Optimal navigation via a discrete loss** (arXiv 2506.15902) adapted to the plate — being
-   explored as an alternative to RL.
-3. User's feature list: coloured dots (sequence/colour choice), UI extras (target size, speed,
-   learned-map overlay, keyboard/joystick), smoother line tracking on tight curves.
-4. Cleanup: remove dead code in `plate_env.py` (tick mapping, shake escapes, ledge comments);
-   near-frame zone revisited later; maze / sim-to-real maze work afterwards.
+### Holes and automatic reload
+- **Hole detection** (`rl_hw/hole.py`): the plate's hole shows as the only very dark blob on the
+  paper (V < 70 vs paper ~200); position/radius in plate metres, `holes.json`.
+- **Keep-out zone** (hole + 8 mm): clicks inside are refused; moves and drawn paths go round it on
+  an arc of via points (each chord provably clear of the zone).
+- **Drop test** (UI): aims at the hole on purpose; the ball falls, the elevator reloads it
+  (first test: back after 18.9 s), and the previous target resumes.
+- **Lost-ball rule (user):** plate level + elevator on while the ball is missing, off when seen.
+
+### The levelling incident — what it taught
+A plate marker was briefly hidden → the pose (and so the tilt reading) was wrong by degrees → the
+closed-loop "level" drove both tilt motors to their tick limits (~5° real tilt) → the ball rolled
+onto a corner marker, keeping the reading wrong; the reload waited for a ball "away from the
+edge" and the elevator kept running; the shutdown stop was lost mid-packet. Afterwards motor 3's
+level point had moved by ~1000, then ~600 ticks between two sweeps (its link to the plate slips
+under that load). **Lessons (all in the code now):** level on the camera angle, never on a stored
+motor position (user); never correct on a frame with a missing marker; stop pushing a motor whose
+travel does not change the measured angle (this is what makes a slipping link harmless); a reload
+ends when the ball is seen anywhere; verify that the elevator really stopped.
+
+### ODIL: from 56 % to on par with RL
+| Version | Change | Sim: reached / inside after / exits / jerk |
+|---|---|---|
+| v4 (rig so far) | smooth static-friction model | 56 % / 43 % / 0.7 / 0.003 |
+| v5 | + leaky integral of the goal error (state + input), near-goal starts, per-trajectory physics | 98 % / 46 % / 4.9 / 0.009 (limit cycle) |
+| v6 | + randomised 3-stage delay, policy sees only an observer (output feedback), gentle near field | 84 % / 60 % / 2.6 / 0.006 |
+| v7 | "rest anywhere inside" + radius input | 72 % / 44 % / 1.3 (stalls on stiction) |
+| v9 | 5-stage delay (≈ pure delay) | 61 % / 45 % / 0.9 / 0.004 (too timid) |
+| v10 (4-stage delay) + fc | between v6 and v9 | 93 % / 67 % / 2.1 / 0.004 |
+| v6 far / v9 near, both + fc | two ODIL policies, switched near the target | 96 % / 67 % / 2.1 / 0.005 |
+| **v6 + stiction compensation** | breakaway boost when the ball is still outside the target | **97 % / 69 % / 3.0 / 0.006** |
+| RL v3 (reference) | PPO, trained in this simulator | 96 % / 72 % / 1.4 / 0.017 |
+
+The trade-off that runs through all versions: robustness to the loop delay makes the policy gentle,
+and a gentle policy cannot break paper stiction; a plain friction-compensation add-on (the classic
+controller's pulse idea) resolves it. Velocity smoothing made it worse (the problem is delay, not
+noise).
+
+### Rig comparison (78 random targets, white paper, hole, taped right side)
+| Setup | Reached | Taped side | Time to reach | Inside after (4 s) | Final distance |
+|---|---|---|---|---|---|
+| Classic | 18/18 | 5/5 | 1.5 s | 70 % | 7.5 mm |
+| RL + settle | 20/20 | 6/6 | 1.3 s | 78 % | 6.0 mm |
+| ODIL v6 + fc (pure) | 20/20 | 6/6 | 1.9 s | 67 % | 10.8 mm |
+| ODIL v6 + fc + settle | 20/20 | 4/4 | 1.3 s | 77 % | 6.1 mm |
+
+Before v6, pure ODIL (v4) reached 22/31 targets and 7/11 on the tape; RL alone 21/25 and 4/8 —
+the tape (different friction) is where a controller without error memory fails.
+
+RIG_JERK_PLACEHOLDER
+
+## 9. Recommended next steps
+
+1. **Pure ODIL near-field precision** (10.8 mm vs ~6 mm for the hybrids): v10 (4-stage delay,
+   more decisive near field) and a two-policy ODIL (v6 far, v9 near: sim exits 3.0 → 2.1).
+2. **Fit ODIL's model to measured trajectories** (rig logs) instead of hand-set ranges.
+3. **The hole as a constraint inside the ODIL optimisation** (smooth planned paths round it).
+4. Showcases: writing/drawing with the ball; automatic self-calibration; maze with ODIL.
+5. User's feature list: coloured dots, UI extras, smoother line tracking on tight curves.

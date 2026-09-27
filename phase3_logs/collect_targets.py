@@ -71,6 +71,7 @@ def main():
         start = math.hypot(tx - bx, ty - by)
         cmd(cmd="target_xy", x=tx, y=ty, r=R)
         t0 = time.time()
+        j0 = (s.get("jerk_sum", 0.0), s.get("jerk_n", 0))
         t_reach, hold_t, lost, inside, samples, dists = None, None, False, 0, 0, []
         while True:
             time.sleep(0.1)
@@ -88,14 +89,16 @@ def main():
             if (t_reach is None and now > REACH_TIMEOUT_S) or (t_reach is not None and now - t_reach > AFTER_S) \
                     or (lost and now > REACH_TIMEOUT_S):
                 break
-        rec = dict(i=i, t=time.time(), ctrl=ctrl, target=[tx, ty], start=[bx, by], start_dist=start,
+        jerk = ((s.get("jerk_sum", 0.0) - j0[0]) / max(1, s.get("jerk_n", 0) - j0[1])) if "jerk_sum" in s else None
+        rec = dict(i=i, t=time.time(), ctrl=ctrl, jerk=jerk, target=[tx, ty], start=[bx, by], start_dist=start,
                    reached=t_reach is not None, t_reach=t_reach, inside_after=(inside / samples) if samples else 0.0,
                    final_dist=dists[-1] if dists else None, max_after=max(dists) if dists else None, lost=lost)
         f.write(json.dumps(rec) + "\n")
         f.flush()
         print(f"{i:3d} {ctrl:8s} {start * 1000:5.0f} mm  reached={rec['reached']!s:5s} "
               f"t={t_reach if t_reach is None else round(t_reach, 1)}  inside_after={rec['inside_after']:.2f}  "
-              f"final={None if rec['final_dist'] is None else round(rec['final_dist'] * 1000, 1)} mm", flush=True)
+              f"final={None if rec['final_dist'] is None else round(rec['final_dist'] * 1000, 1)} mm  "
+              f"jerk={None if jerk is None else round(jerk, 4)}", flush=True)
     cmd(cmd="controller", which="classic")
     cmd(cmd="hybrid", on=True)
 

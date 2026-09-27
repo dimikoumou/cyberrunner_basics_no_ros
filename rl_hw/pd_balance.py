@@ -539,6 +539,7 @@ def main():
         adopt_goal(h["center"], h["radius"], None, None, h["px"][:2], h["px"][2], "drop test: into the hole")
 
     xb = yb = 0.0
+    jerk_sum, jerk_n = 0.0, 0
     lost_xy = None
     lost_since, lost_alerted = None, False
     if ui is not None:
@@ -1045,7 +1046,12 @@ def main():
                 if env.hold_level:
                     action = np.zeros(2, dtype=np.float32)
                     phase, kick, move = "idle", np.zeros(2), None
+                prev_applied = np.array(env._last_commanded_action, dtype=float)
                 obs, reward, terminated, truncated, info = env.step(action)
+                # smoothness (same "jerk" as rl_sim/eval_controllers): squared change of the
+                # applied command per step, summed; clients take differences over a trip
+                jerk_sum += float(np.sum((np.asarray(env._last_commanded_action, dtype=float) - prev_applied) ** 2))
+                jerk_n += 1
                 if rl_ctrl is not None:
                     rl_ctrl.record_applied(env._last_commanded_action)
                 if odil_ctrl is not None:
@@ -1106,6 +1112,7 @@ def main():
                                  goal=[goal[0], goal[1]], goal_r=goal_tol,
                                  dist=(line_off if (mode in ("line", "path") and follower is not None) else dist) if ball_found else None,
                                  in_target=bool(in_circle), hold=(now - hold_start) if hold_start else 0.0,
+                                 jerk_sum=jerk_sum, jerk_n=jerk_n,
                                  hz=(1.0 / dt_real) if dt_real > 0 else None)
                     ui.set_overlay(ball_px=getattr(env.pipeline.measurements.detector, "ball_pos", None) if ball_found else None,
                                    goal_px=goal_px, goal_r_px=goal_r_px, contour_px=goal_contour_px)
