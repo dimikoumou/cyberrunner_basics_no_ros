@@ -58,9 +58,10 @@ import torch
 torch.set_num_threads(int(os.environ.get("ODIL_THREADS", "3")))  # leave cores for the rig
 TAU, A_ROLL, EPS_V, V_STRIBECK = 0.045, 0.025, 0.004, 0.01
 K_RANGE = (0.085, 0.125)
-STATIC_DEG_RANGE = (1.2, 2.6)
+STATIC_DEG_RANGE = tuple(float(v) for v in os.environ.get("ODIL_STATIC_RANGE", "1.2,2.6").split(","))
 R_RANGE = (0.008, 0.03)
 INSIDE_FRAC = float(os.environ.get("ODIL_INSIDE_FRAC", "0.25"))    # of the near starts
+END_FREE = float(os.environ.get("ODIL_END_FREE", "0.5"))   # end may rest this x R off centre (v8: 0 = at the centre)
 BIAS_DEG_MAX = float(os.environ.get("ODIL_BIAS_DEG", "0.8"))
 TZ = 1.5                                # s, integrator leak
 Z_SCALE = 0.02                          # m: 2 cm error held 1 s -> z ~ 1
@@ -188,7 +189,7 @@ def main():
             chain = torch.stack([end[:, s_] for s_ in (C1, C2, C3, O1, O2)], 1)
             hold = (((u_end[:, None, :] - chain) / U_MAX_DEG) ** 2).sum(-1).mean()
             w_T = torch.where(B["near"][:, None], torch.full_like(T, NEAR_LAM), torch.ones_like(T))
-            off = torch.relu(B["end_off"].norm(dim=-1) - 0.5 * B["R"][:, 0, 0]) / 0.005
+            off = torch.relu(B["end_off"].norm(dim=-1) - END_FREE * B["R"][:, 0, 0]) / 0.005
             inside_pen = (off ** 2).mean()
             loss = phys * 100.0 + lam * (w_T * T).mean() + mu * smooth + 10.0 * hold + 10.0 * inside_pen
             opt_pol.zero_grad()

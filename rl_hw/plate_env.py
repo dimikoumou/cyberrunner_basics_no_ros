@@ -126,6 +126,10 @@ LEVEL_TICKS = {1: int(os.environ.get("PLATE_LEVEL_M1", "2952")), 3: int(os.envir
 # ~1 s. Hard band: never further than TILT_BAND_DEG from the level position.
 TILT_TRUST_DEG = 3.0
 TILT_BAND_DEG = 6.5
+# Direct motor mapping (default, 2026-09-27): ticks = LEVEL_TICKS + (target - level) x
+# TICKS_PER_DEG, no camera in the tilt loop at all. Every camera-corrected variant broke
+# when the ball sat beside a plate marker (reading wrong by 5-15 deg and unresponsive).
+TILT_OPEN_LOOP = os.environ.get("PLATE_TILT_CLOSED_LOOP") != "1"
 TICK_BOUNDS = {1: (1800, 3900), 3: (700, 3800)}  # where each axis's angle plateaus (measured)
 LEVEL_TOL_DEG = 0.4
 # Delay-aligned correction (research workflow 2026-09-26, Smith-predictor idea):
@@ -698,6 +702,13 @@ class HardwarePlateEnv(gym.Env):
         self._target_hist = self._target_hist[-12:]
         for i, dxl_id in enumerate(DXL_IDS):
             tpd = TICKS_PER_DEG[dxl_id]
+            if TILT_OPEN_LOOP:
+                band = abs(TILT_BAND_DEG * tpd)
+                want = LEVEL_TICKS[dxl_id] + (target[i] - LEVEL_OFFSET_DEG[i]) * tpd
+                pos = int(np.clip(want, LEVEL_TICKS[dxl_id] - band, LEVEL_TICKS[dxl_id] + band))
+                self._cmd_ticks[dxl_id] = pos
+                set_position(self.port_handler, self.packet_handler, dxl_id, pos)
+                continue
             d = min(TILT_MEAS_DELAY_STEPS[dxl_id], len(self._target_hist) - 1)
             target_then = self._target_hist[-1 - d][i]
             delta = (target[i] - self._tilt_target[i]) * tpd
