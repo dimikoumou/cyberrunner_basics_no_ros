@@ -48,11 +48,16 @@ class ODILController:
 
     def __init__(self, path):
         self.net = MLP(path)
+        w = np.load(path)
+        self.n_in = int(w["n_in"]) if "n_in" in w.files else 8      # v5: + leaky goal-error integral
+        self.tz = float(w["tz"]) if "tz" in w.files else 1.5
+        self.z_scale = float(w["z_scale"]) if "z_scale" in w.files else 0.02
         self.reset()
 
     def reset(self):
         self.th = np.zeros(2)
         self.thl = np.zeros(2)
+        self.z = np.zeros(2)
 
     def __call__(self, obs):
         rel, v = obs[0:2] * 0.1, obs[2:4] * 0.1
@@ -61,6 +66,9 @@ class ODILController:
         self.th += (applied_deg - self.th) * DT / self.TAU
         self.thl += (self.th - self.thl) * DT / self.TAU
         feat = np.concatenate([rel / 0.1, v / 0.1, self.th / 5.0, self.thl / 5.0])
+        if self.n_in == 10:
+            self.z += (rel / self.z_scale - self.z / self.tz) * DT
+            feat = np.concatenate([feat, self.z])
         u_deg = 5.0 * 0.8 * np.tanh(self.net(feat))
         return np.clip(u_deg / 5.0 / ACTION_SCALE, -1, 1)   # env multiplies by ACTION_SCALE
 
@@ -108,7 +116,10 @@ def main():
         ctrls["RL v3"] = lambda o: np.clip(rl(o), -1, 1)
     for name in sorted(os.listdir(RUNS)):
         p = os.path.join(RUNS, name, "odil_policy.npz")
-        if name.startswith("odil") and os.path.exists(p) and name != "odil_smoke":
+        only = os.environ.get("EVAL_ONLY")
+        if only and name not in only.split(","):
+            continue
+        if name.startswith("odil") and os.path.exists(p) and "smoke" not in name:
             ctrls[name] = ODILController(p)
     print(f"{'controller':12s} success  t_reach  inside_after  exits_after  jerk     final_dist")
     for name, c in ctrls.items():

@@ -66,14 +66,25 @@ class ODILRigController:
         n = sum(1 for k in w.files if k.startswith("W") and k[1:].isdigit())
         self.layers = [(w[f"W{i}"], w[f"b{i}"]) for i in range(n)]
         self.path = path
+        # v5 (odil_plate_v5.py): 10 inputs, the last two a leaky integral of the goal error
+        self.n_in = int(w["n_in"]) if "n_in" in w.files else 8
+        self.tz = float(w["tz"]) if "tz" in w.files else 1.5
+        self.z_scale = float(w["z_scale"]) if "z_scale" in w.files else 0.02
+        self._t_prev = None
         self.reset()
 
     def reset(self):
         self.th = np.zeros(2)
         self.thl = np.zeros(2)
+        self.z = np.zeros(2)
+        self._t_prev = None
 
-    def action(self, goal, pos, vel):
-        feat = np.concatenate([(np.asarray(goal) - pos) / 0.1, np.asarray(vel) / 0.1, self.th / 5.0, self.thl / 5.0])
+    def action(self, goal, pos, vel, dt=None):
+        rel = np.asarray(goal) - np.asarray(pos)
+        feat = np.concatenate([rel / 0.1, np.asarray(vel) / 0.1, self.th / 5.0, self.thl / 5.0])
+        if self.n_in == 10:
+            self.z += (rel / self.z_scale - self.z / self.tz) * (dt or self.DT)
+            feat = np.concatenate([feat, self.z])
         h = feat
         for i, (W, b) in enumerate(self.layers):
             h = W @ h + b

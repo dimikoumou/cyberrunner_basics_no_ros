@@ -728,6 +728,16 @@ def main():
                                 line_msg = f"Driving the path ({follower.L * 100:.0f} cm)"
                                 running = True
                             ui.set_state(line_msg=line_msg)
+                        elif kind == "target_xy":
+                            # scripted target in plate metres (data collection); same routing as a click
+                            xy = np.array([float(c["x"]), float(c["y"])])
+                            if near_hole(holes, xy) is None and abs(xy[0]) < env._x_half - 0.015 \
+                                    and abs(xy[1]) < env._y_half - 0.015:
+                                if mode != "click":
+                                    mode, live_goal, follower, line_active = "click", False, None, False
+                                    ui.set_state(mode=mode)
+                                set_target(xy, float(c.get("r", CLICK_R)), why="scripted", from_xy=(xb, yb))
+                                running = True
                         elif kind == "drop_test":
                             if not holes:
                                 publish_holes("no hole found -- press Find holes")
@@ -986,7 +996,7 @@ def main():
                         print(f"  hybrid: ball {dist_now * 1000:.0f} mm out -> policy approach")
                     if policy_driving:
                         if use_odil:
-                            action = odil_ctrl.action(goal, (xb, yb), (vx, vy)).astype(np.float32)
+                            action = odil_ctrl.action(goal, (xb, yb), (vx, vy), dt_real if dt_real > 0 else None).astype(np.float32)
                         else:
                             action = rl_ctrl.action(goal, goal_tol, (xb, yb), (vx, vy), alpha, beta).astype(np.float32)
                         move, move_request, phase, kick = None, False, "idle", np.zeros(2)
