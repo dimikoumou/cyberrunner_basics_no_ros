@@ -293,8 +293,6 @@ def _sigterm(*_):
 
 def main():
     _single_instance_or_exit()
-    if os.environ.get("PD_UI") == "1":
-        os.environ.setdefault("PLATE_OPEN_LOOP_LEVEL", "1")   # env init levels to the fixed position too
     signal.signal(signal.SIGTERM, _sigterm)
     total_steps = int(sys.argv[1]) if len(sys.argv) > 1 else 6000
     max_episodes = int(sys.argv[2]) if len(sys.argv) > 2 else 15
@@ -495,9 +493,10 @@ def main():
             elevator.start()
         started = True
         print(f"ball lost -- running the elevator at {elevator.units} units until it is back")
-        env._level_open_loop()                 # fixed level position, no camera
+        env._servo_level(max_s=3.0)            # level on the camera-measured angle
+        level = np.zeros(2, dtype=np.float32)
         while time.time() - t0 < timeout:
-            env._level_open_loop()                 # stays at the fixed level the whole time
+            env._write_action(level)               # closed-loop level step on the camera angle, every frame
             xr, yr, _, _, found = env._read_state()
             # back = seen anywhere on the plate (corners too), just not inside the hole
             ok = found and near_hole(holes, (xr, yr), extra=-HOLE_MARGIN_M) is None
@@ -537,7 +536,7 @@ def main():
     lost_since, lost_alerted = None, False
     if ui is not None:
         env.recover_tilts = False            # ball missing -> plate stays level (no recovery tilts)
-        env.open_loop_level = True           # "level" = the fixed level position, never camera-chased
+
 
     def on_wait_tick():
         track_lost(False)
@@ -1033,7 +1032,7 @@ def main():
                 if not running:
                     action = np.zeros(2, dtype=np.float32)   # stopped: hold the plate level
                     phase, kick, move = "idle", np.zeros(2), None
-                # ball not seen, or elevator running -> the fixed level position (open loop)
+                # ball not seen, stopped, or elevator running -> level (camera-measured 0 deg)
                 env.hold_level = ui is not None and (not running or not last_found
                                                      or (elevator is not None and elevator.on))
                 if env.hold_level:

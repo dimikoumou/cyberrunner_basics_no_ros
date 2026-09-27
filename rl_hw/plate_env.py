@@ -129,7 +129,13 @@ TILT_BAND_DEG = 6.5
 # Direct motor mapping (default, 2026-09-27): ticks = LEVEL_TICKS + (target - level) x
 # TICKS_PER_DEG, no camera in the tilt loop at all. Every camera-corrected variant broke
 # when the ball sat beside a plate marker (reading wrong by 5-15 deg and unresponsive).
-TILT_OPEN_LOOP = os.environ.get("PLATE_TILT_CLOSED_LOOP") != "1"
+TILT_OPEN_LOOP = os.environ.get("PLATE_TILT_OPEN_LOOP") == "1"     # default: camera closed loop (user)
+# Camera closed loop guards (2026-09-27): the runaways to the tick limit happened while the
+# plate was NOT following motor 3 (its link slipped): the loop kept adding ticks. If a motor
+# has moved STALL_TICKS by correction without the measured angle improving by STALL_GAIN_DEG,
+# further correction in that direction is refused (and logged) until the angle responds.
+STALL_TICKS = 400
+STALL_GAIN_DEG = 0.5
 TICK_BOUNDS = {1: (1800, 3900), 3: (700, 3800)}  # where each axis's angle plateaus (measured)
 LEVEL_TOL_DEG = 0.4
 # Delay-aligned correction (research workflow 2026-09-26, Smith-predictor idea):
@@ -280,7 +286,8 @@ class HardwarePlateEnv(gym.Env):
         self._cmd_ticks = {}           # last commanded goal position per motor (tilt_control)
         self._tilt_target = LEVEL_OFFSET_DEG  # last target (alpha, beta) in degrees
         self._meas_tilt = None          # last plausible measured (alpha, beta) in degrees
-        self._ticks_hist = {}           # dxl_id -> recent commanded ticks (to compare with the delayed camera)
+        self._stall = {}                # dxl_id -> correction-without-response tracker (see STALL_TICKS)
+        self._pose_ok = True
         self._target_hist = []          # recent (alpha, beta) targets, newest last
         self._last_commanded_action = np.zeros(2, dtype=np.float32)
         self._pos_history = []
@@ -631,6 +638,9 @@ class HardwarePlateEnv(gym.Env):
             return np.nan, np.nan, 0.0, 0.0, False
         alpha, beta = inputs
         ball_found = not (np.isnan(xb) or np.isnan(yb))
+        # a plate marker not found this frame -> the detector used the middle of its search
+        # window: the tilt is wrong, so the servo must not correct on it (see _servo_tilt)
+        self._pose_ok = not bool(getattr(self.pipeline.measurements.detector, "corners_missing", False))
         # Defense in depth: a mis-detected blob (e.g. a large false-positive region
         # under bad lighting getting through the ball detector) can still produce a
         # numeric, non-NaN position -- just a physically impossible one. Observed
@@ -711,20 +721,27 @@ class HardwarePlateEnv(gym.Env):
                 continue
             d = min(TILT_MEAS_DELAY_STEPS[dxl_id], len(self._target_hist) - 1)
             target_then = self._target_hist[-1 - d][i]
-            delta = (target[i] - self._tilt_target[i]) * tpd
-            hist = self._ticks_hist.setdefault(dxl_id, [])
-            ticks_then = hist[-1 - d] if len(hist) > d else self._cmd_ticks.get(dxl_id, LEVEL_TICKS[dxl_id])
-            expected = LEVEL_OFFSET_DEG[i] + (ticks_then - LEVEL_TICKS[dxl_id]) / tpd
-            if abs(meas[i] - expected) < TILT_TRUST_DEG:     # camera agrees with the motor -> correct
-                delta += TILT_GAIN * (target_then - meas[i]) * tpd
-            delta = float(np.clip(delta, -MAX_TICKS_PER_STEP, MAX_TICKS_PER_STEP))
+            ff = (target[i] - self._tilt_target[i]) * tpd          # feedforward on the target change
+            corr = 0.0
+            if self._pose_ok:                                      # all 4 plate markers seen this frame
+                err = target_then - meas[i]
+                corr = TILT_GAIN * err * tpd
+                cur = self._cmd_ticks.get(dxl_id)
+                st = self._stall.get(dxl_id)
+                if st is None or cur is None or abs(err) < st["err"] - STALL_GAIN_DEG:
+                    st = self._stall[dxl_id] = {"ticks": cur, "err": abs(err), "warned": False}
+                st["ticks"] = (st["ticks"] or 0) + ff                 # feedforward moves are legitimate
+                moved = (cur or 0) - st["ticks"]
+                if abs(moved) > STALL_TICKS and np.sign(corr) == np.sign(moved):
+                    if not st["warned"]:
+                        print(f"[HardwarePlateEnv] motor {dxl_id}: {abs(moved):.0f} ticks of correction but the "
+                              f"measured angle did not follow -- not pushing further (plate not following?)")
+                        st["warned"] = True
+                    corr = 0.0
+            delta = float(np.clip(ff + corr, -MAX_TICKS_PER_STEP, MAX_TICKS_PER_STEP))
             lo, hi = TICK_BOUNDS[dxl_id]
-            band = abs(TILT_BAND_DEG * tpd)
-            lo, hi = max(lo, int(LEVEL_TICKS[dxl_id] - band)), min(hi, int(LEVEL_TICKS[dxl_id] + band))
             pos = int(np.clip(self._cmd_ticks.get(dxl_id, (lo + hi) // 2) + delta, lo, hi))
             self._cmd_ticks[dxl_id] = pos
-            hist.append(pos)
-            del hist[:-12]
             set_position(self.port_handler, self.packet_handler, dxl_id, pos)
         self._tilt_target = target
 
@@ -768,15 +785,11 @@ class HardwarePlateEnv(gym.Env):
         """plate straight to the fixed level position (LEVEL_TICKS), no camera involved"""
         for dxl_id, pos in LEVEL_TICKS.items():
             self._cmd_ticks[dxl_id] = pos
-            self._ticks_hist[dxl_id] = [pos] * 12
             set_position(self.port_handler, self.packet_handler, dxl_id, pos)
         self._tilt_target = LEVEL_OFFSET_DEG
         self._target_hist = [LEVEL_OFFSET_DEG] * 12
 
     def _write_action(self, action):
-        if getattr(self, "hold_level", False):
-            self._level_open_loop()      # ball missing / elevator running: fixed level, nothing else
-            return
         if self.tilt_control:
             self._servo_tilt(action)
             return
@@ -1212,7 +1225,7 @@ class HardwarePlateEnv(gym.Env):
             if not getattr(self, "recover_tilts", True):
                 # 2026-09-27 (user): while the ball is missing the plate stays LEVEL -- no
                 # recovery tilts (a lost ball is under the plate / out, not in a corner)
-                self._level_open_loop()
+                self._write_action(np.zeros(2, dtype=np.float32))    # closed-loop level step (camera)
                 xb, yb, alpha, beta, ball_found = self._read_state()
                 continue
             if waited - last_log >= LOG_EVERY_S:
