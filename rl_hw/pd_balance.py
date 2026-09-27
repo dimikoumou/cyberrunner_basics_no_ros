@@ -28,7 +28,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 from plate_env import HardwarePlateEnv  # noqa: E402
-from goal_circle import detect_goal_circle, detect_on_frame, save_debug, save_last_goal  # noqa: E402
+from goal_circle import (detect_goal_circle, detect_on_frame, save_debug, save_last_goal,  # noqa: E402
+                         pixel_to_plate, inside_region)
+from ui_server import UIServer, FRAME_W, FRAME_H  # noqa: E402
+from line_path import detect_line, LineFollower  # noqa: E402
 
 SNAPSHOT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pd_snapshots")
 SNAPSHOT_EVERY_S = float(os.environ.get("PD_SNAPSHOT_S", "2.0"))  # e.g. 30 for long unattended runs
@@ -147,6 +150,8 @@ class PlateMap:
         w = self._w(xy)[ok]
         return float((w * self.static[ok]).sum() / w.sum()) if ok.any() else None
 GOAL_CHECK_S = 0.5
+CLICK_R = 0.012   # target radius for a clicked point (m)
+LINE_TOL = 0.008  # line mode: the carrot's "target radius" and the on-line tolerance (m)
 GOAL_CONFIRM = 3
 GOAL_AGREE_M = 0.004
 GOAL_MOVE_M = 0.008
@@ -206,6 +211,13 @@ def main():
     )
     live_goal = True
     goal_provisional = False
+    goal_polygon = goal_contour_px = goal_px = goal_r_px = None
+    ui = UIServer(int(os.environ.get("PD_UI_PORT", "8000"))) if os.environ.get("PD_UI") == "1" else None
+    if ui is not None:
+        env.frame_callback = ui.publish_frame
+    running = ui is None           # with the UI, wait for Start (or a click)
+    mode = "sheet"
+    follower, line_off, line_msg = None, None, ""
     if os.environ.get("PD_GOAL"):
         # virtual goal for testing: PD_GOAL="x,y,r" in metres; disables live re-detection
         gx_, gy_, gr_ = (float(v) for v in os.environ["PD_GOAL"].split(","))
@@ -222,10 +234,18 @@ def main():
         try:
             res = detect_goal_circle(env)
         except RuntimeError as e:
-            env.close()
-            log.close()
-            sys.exit(f"could not find the goal circle on the sheet: {e}")
+            if ui is None:
+                env.close()
+                log.close()
+                sys.exit(f"could not find the goal circle on the sheet: {e}")
+            print(f"no red region found ({e}) -- UI starts in click-to-target mode")
+            res = {"center": (0.0, 0.0), "radius": 0.02, "px": None, "frame": None, "n_frames": 0,
+                   "spread_m": 0.0, "source": "none", "polygon": None, "contour_px": None}
+            mode, live_goal = "click", False
         goal, goal_tol = res["center"], res["radius"]
+        goal_polygon, goal_contour_px = res.get("polygon"), res.get("contour_px")
+        if res.get("px") is not None:
+            goal_px, goal_r_px = res["px"][:2], res["px"][2]
         save_debug(res, os.path.join(LOG_DIR, os.path.basename(log_path).replace(".csv", "_goal.jpg")))
         print(f"goal circle detected ({res['source']}): centre ({goal[0]:+.4f}, {goal[1]:+.4f}) m, radius "
               f"{goal_tol * 1000:.1f} mm (median of {res['n_frames']} frames, spread {res['spread_m'] * 1000:.1f} mm)")
@@ -234,18 +254,41 @@ def main():
     env.goal_tolerance = goal_tol
     # Edge guard only where the ball is past the wall threshold AND further out than
     # the goal disc on that side -- a disc drawn near an edge stays reachable.
-    def edge_limits(g, r):
+    def edge_limits(g, r, quiet=False):
         # Guard only well past the goal circle: with it right at the circle's edge
         # (e.g. at 10.4 cm for a 9 mm dot at x=9.5 cm) every small overshoot got a
         # full-tilt shove back -> overshoot the other way -> repeating pattern.
         # 3 cm beyond the circle, capped 1 cm short of the plate's edge.
         ex = max(EDGE_X, min(abs(g[0]) + r + 0.03, env._x_half - 0.01))
         ey = max(EDGE_Y, min(abs(g[1]) + r + 0.03, env._y_half - 0.01))
-        if ex > EDGE_X or ey > EDGE_Y:
+        if (ex > EDGE_X or ey > EDGE_Y) and not quiet:
             print(f"goal is near an edge: edge guard moved out to |x|>{ex:.3f}, |y|>{ey:.3f}")
         return ex, ey
 
     edge_x, edge_y = edge_limits(goal, goal_tol)
+
+    def adopt_goal(center, radius, polygon=None, contour_px=None, px=None, r_px=None, why=""):
+        """Switch the controller to a new target (sheet re-detection or a UI click)."""
+        nonlocal goal, goal_tol, goal_polygon, goal_contour_px, goal_px, goal_r_px, edge_x, edge_y
+        nonlocal hold_start, phase, kick, lockout_until, goal_provisional, n_goal_changes
+        goal = (float(center[0]), float(center[1]))
+        goal_tol = float(radius)
+        goal_polygon, goal_contour_px, goal_px, goal_r_px = polygon, contour_px, px, r_px
+        env.fixed_goal = goal
+        env.goal = np.array(goal, dtype=np.float32)
+        env.goal_tolerance = goal_tol
+        edge_x, edge_y = edge_limits(goal, goal_tol)
+        # new target: restart the hold and any stiction pulse; keep the learned level
+        # bias (it belongs to the plate, not the target)
+        hold_start = None
+        phase, lockout_until = "idle", 0.0
+        kick = np.zeros(2)
+        pos_buf.clear()
+        goal_cands.clear()
+        goal_provisional = False
+        n_goal_changes += 1
+        print(f"\n>>> NEW GOAL ({why}): centre ({goal[0]:+.4f}, {goal[1]:+.4f}) m, radius {goal_tol * 1000:.1f} mm <<<\n")
+
     goal_cands = []
     last_goal_check = 0.0
     n_goal_changes = 0
@@ -292,6 +335,79 @@ def main():
             ep_steps = 0
             for i in range(total_steps - total_taken):
                 xb, yb, vx, vy, alpha, beta, gx, gy = obs
+                if ui is not None:
+                    for c in ui.pop_commands():
+                        kind = c.get("cmd")
+                        if kind == "start":
+                            if mode == "line" and follower is None:
+                                line_msg = "No red line to follow -- draw one, then choose 'Follow red line' again"
+                                ui.set_state(line_msg=line_msg)
+                            else:
+                                running = True
+                        elif kind == "stop":
+                            running = False
+                        elif kind == "mode" and c.get("mode") in ("sheet", "click", "line"):
+                            mode = c["mode"]
+                            live_goal = mode == "sheet"
+                            follower = None
+                            ui.set_overlay(path_px=None)
+                            ui.set_state(mode=mode)
+                            if mode == "line" and getattr(env, "_last_frame", None) is not None:
+                                ln = detect_line(env, env._last_frame)
+                                if ln is None:
+                                    line_msg = "No red line found on the sheet"
+                                    running = False
+                                else:
+                                    follower = LineFollower(ln["path"], ln["closed"], np.array([xb, yb]))
+                                    line_msg = (f"{'Loop' if ln['closed'] else 'Line'} of {ln['length'] * 100:.0f} cm found"
+                                                f" -- press Start")
+                                    goal_polygon = goal_contour_px = goal_px = goal_r_px = None
+                                    ui.set_overlay(path_px=ln["path_px"], path_closed=ln["closed"], contour_px=None)
+                                print(line_msg)
+                                ui.set_state(line_msg=line_msg)
+                            if mode == "sheet" and getattr(env, "_last_frame", None) is not None:
+                                cand = detect_on_frame(env, env._last_frame)
+                                if cand is not None:
+                                    ex = cand[2]
+                                    adopt_goal(cand[0], cand[1], ex["polygon"], ex["contour_px"], ex["px"][:2],
+                                               ex["px"][2], "sheet")
+                        elif kind == "test_line":
+                            # synthetic route for testing the following without a sheet
+                            th = np.linspace(0, 2 * np.pi, 160, endpoint=False)
+                            rr = float(c.get("r", 0.04))
+                            path = np.column_stack([rr * np.cos(th), rr * np.sin(th)])
+                            mode, live_goal = "line", False
+                            follower = LineFollower(path, True, np.array([xb, yb]))
+                            goal_polygon = goal_contour_px = goal_px = goal_r_px = None
+                            line_msg = f"Test loop r={rr * 100:.0f} cm"
+                            ui.set_state(mode=mode, line_msg=line_msg)
+                            ui.set_overlay(path_px=None, contour_px=None)
+                            running = True
+                        elif kind == "click" and mode == "click":
+                            row, col = float(c.get("v", -1)) * FRAME_H, float(c.get("u", -1)) * FRAME_W
+                            xy = pixel_to_plate(env, row, col)
+                            xy2 = pixel_to_plate(env, row, col + 10.0)
+                            if (xy is None or abs(xy[0]) > env._x_half - 0.015
+                                    or abs(xy[1]) > env._y_half - 0.015):
+                                print(f"click at pixel ({col:.0f},{row:.0f}) is not on the plate -- ignored")
+                            else:
+                                px_per_m = 10.0 / max(np.hypot(*(xy2 - xy)), 1e-6) if xy2 is not None else 1000.0
+                                adopt_goal(xy, CLICK_R, None, None, (col, row), CLICK_R * px_per_m, "click")
+                                running = True
+                if mode == "line" and follower is not None:
+                    tgt, line_off, finished = follower.target((xb, yb))
+                    goal, goal_tol = (float(tgt[0]), float(tgt[1])), LINE_TOL
+                    env.goal = np.array(goal, dtype=np.float32)
+                    env.fixed_goal, env.goal_tolerance = goal, goal_tol
+                    edge_x, edge_y = edge_limits(goal, goal_tol, quiet=True)
+                    goal_px = goal_r_px = None
+                    if finished and line_msg != "Reached the end of the line":
+                        line_msg = "Reached the end of the line"
+                        print(line_msg)
+                        if ui is not None:
+                            ui.set_state(line_msg=line_msg)
+                if ui is not None or (mode == "line" and follower is not None):
+                    gx, gy = goal[0] - xb, goal[1] - yb
                 dist_now = float(np.hypot(gx, gy))
                 # 0 = fully "far" gains, 1 = fully "near" gains, smoothly blended
                 # over GAIN_BLEND_WIDTH so there's no gain discontinuity right at
@@ -358,7 +474,7 @@ def main():
                     kick = np.zeros(2)
                 kicking = phase != "idle"
                 # the integral learns the level bias only from a rolling ball, never stiction
-                if dist_now < I_ZONE and not kicking and not stationary:
+                if running and dist_now < I_ZONE and not kicking and not stationary:
                     integ = np.clip(integ + KI * e * dt_real, -I_MAX, I_MAX)
                 v_ref = (kp / kd) * e
                 v_ref_mag = float(np.hypot(*v_ref))
@@ -402,13 +518,21 @@ def main():
                 # _attempt_unstick(), which is the only thing that has ever
                 # actually freed the ball from this specific spot. Let the wedge
                 # detector fire and do its job instead of masking it.
+                if not running:
+                    action = np.zeros(2, dtype=np.float32)   # stopped: hold the plate level
+                    phase, kick = "idle", np.zeros(2)
                 obs, reward, terminated, truncated, info = env.step(action)
                 dist = float(np.hypot(obs[6], obs[7]))
                 # Only a frame where the ball was actually detected counts: during
                 # step()'s not-found grace frames obs holds the frozen last position.
                 ball_found = bool(info.get("ball_found", True))
                 last_found = ball_found
-                in_circle = ball_found and dist < goal_tol
+                if mode == "line" and follower is not None:
+                    in_circle = ball_found and line_off is not None and line_off < LINE_TOL * 1.25
+                elif goal_polygon is not None and len(goal_polygon) >= 3:
+                    in_circle = ball_found and inside_region(goal_polygon, (obs[0], obs[1]))
+                else:
+                    in_circle = ball_found and dist < goal_tol
                 ep_in_circle += int(in_circle)
                 ep_steps += 1
 
@@ -422,6 +546,15 @@ def main():
                     best_hold = max(best_hold, now - hold_start)
                 elif ball_found or info["status"] == "ball_lost":
                     hold_start = None
+                if ui is not None:
+                    ui.set_state(running=running, mode=mode,
+                                 ball=[float(obs[0]), float(obs[1])] if ball_found else None,
+                                 goal=[goal[0], goal[1]], goal_r=goal_tol,
+                                 dist=(line_off if (mode == "line" and follower is not None) else dist) if ball_found else None,
+                                 in_target=bool(in_circle), hold=(now - hold_start) if hold_start else 0.0,
+                                 hz=(1.0 / dt_real) if dt_real > 0 else None)
+                    ui.set_overlay(ball_px=getattr(env.pipeline.measurements.detector, "ball_pos", None) if ball_found else None,
+                                   goal_px=goal_px, goal_r_px=goal_r_px, contour_px=goal_contour_px)
                 log.write(f"{now - t_start:.3f},{episode},{i},{obs[0]:.5f},{obs[1]:.5f},{obs[2]:.4f},"
                           f"{obs[3]:.4f},{obs[4]:.5f},{obs[5]:.5f},{dist:.5f},{int(in_circle)},{int(ball_found)},"
                           f"{action[0]:.3f},{action[1]:.3f},{info['status']},"
@@ -430,7 +563,7 @@ def main():
                              if getattr(env, "last_inner_corners", None) is not None else ",,,,,,,")
                           + f",{goal[0]:.5f},{goal[1]:.5f},{goal_tol:.5f}\n")
 
-                if live_goal and now - last_goal_check >= GOAL_CHECK_S and getattr(env, "_last_frame", None) is not None:
+                if live_goal and mode == "sheet" and now - last_goal_check >= GOAL_CHECK_S and getattr(env, "_last_frame", None) is not None:
                     last_goal_check = now
                     cand = detect_on_frame(env, env._last_frame)
                     # a provisional goal (fitted with the ball covering part of it) is
@@ -446,25 +579,11 @@ def main():
                             goal_cands.clear()
                         goal_cands.append(cand)
                         if len(goal_cands) >= GOAL_CONFIRM:
-                            c = np.median([g for g, _ in goal_cands], axis=0)
-                            goal = (float(c[0]), float(c[1]))
-                            goal_tol = float(np.median([r for _, r in goal_cands]))
-                            env.fixed_goal = goal
-                            env.goal = np.array(goal, dtype=np.float32)
-                            env.goal_tolerance = goal_tol
-                            edge_x, edge_y = edge_limits(goal, goal_tol)
-                            # new target: restart the hold and any kick; keep the learned
-                            # level bias (it belongs to the plate, not the sheet)
-                            hold_start = None
-                            kicking, cap_t, lockout_until = False, None, 0.0
-                            kick[:] = 0
-                            pos_buf.clear()
-                            goal_cands.clear()
-                            n_goal_changes += 1
-                            goal_provisional = False
-                            save_last_goal(goal, goal_tol)
-                            print(f"\n>>> NEW GOAL circle: centre ({goal[0]:+.4f}, {goal[1]:+.4f}) m, "
-                                  f"radius {goal_tol * 1000:.1f} mm <<<\n")
+                            c = np.median([cd[0] for cd in goal_cands], axis=0)
+                            r_med = float(np.median([cd[1] for cd in goal_cands]))
+                            ex = goal_cands[-1][2]
+                            adopt_goal(c, r_med, ex["polygon"], ex["contour_px"], ex["px"][:2], ex["px"][2], "sheet")
+                            save_last_goal(goal, goal_tol, goal_polygon, goal_contour_px)
 
                 if now - last_snapshot >= SNAPSHOT_EVERY_S:
                     frame = env._grab_frame()
