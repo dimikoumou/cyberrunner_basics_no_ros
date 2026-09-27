@@ -33,7 +33,7 @@ from goal_circle import (detect_goal_circle, detect_on_frame, save_debug, save_l
                          pixel_to_plate, inside_region)
 from ui_server import UIServer, FRAME_W, FRAME_H  # noqa: E402
 from line_path import detect_line, PathTracker  # noqa: E402
-from rl_policy import RigPolicyController, ODILRigController  # noqa: E402
+from rl_policy import RigPolicyController, ODILRigController, ODILFrictionCompRig  # noqa: E402
 from elevator import Elevator  # noqa: E402
 from hole import detect_holes_stable, save_holes, near_hole, detour, HOLE_MARGIN_M  # noqa: E402
 from plate_env import LEVEL_OFFSET_DEG  # noqa: E402
@@ -345,7 +345,9 @@ def main():
     # the classic near-field settle for both learned controllers (pure policy all the way in)
     odil_path = os.environ.get("PD_ODIL") or os.path.abspath(os.path.join(
         os.path.dirname(__file__), "..", "rl_sim", "runs", "odil_best", "odil_policy.npz"))
-    odil_ctrl = ODILRigController(odil_path) if os.path.exists(odil_path) else None
+    # PD_ODIL_FC=0 disables the stiction compensation (pure ODIL policy)
+    odil_cls = ODILRigController if os.environ.get("PD_ODIL_FC") == "0" else ODILFrictionCompRig
+    odil_ctrl = odil_cls(odil_path) if os.path.exists(odil_path) else None
     use_odil = bool(os.environ.get("PD_ODIL")) and odil_ctrl is not None
     hybrid = os.environ.get("PD_HYBRID", "1") == "1"
     if odil_ctrl is not None:

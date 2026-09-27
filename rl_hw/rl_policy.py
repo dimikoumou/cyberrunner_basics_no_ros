@@ -100,3 +100,29 @@ class ODILRigController:
         u_deg = 5.0 * np.asarray(applied, dtype=float)
         self.th += (u_deg - self.th) * min(1.0, dt / self.TAU)
         self.thl += (self.th - self.thl) * min(1.0, dt / self.TAU)
+
+
+class ODILFrictionCompRig(ODILRigController):
+    """ODIL + stiction compensation on the rig (rl_sim/odil_friction_comp.py): when the
+    ball has stayed within 1.5 mm for ~0.4 s outside the target, a breakaway boost along
+    the goal direction ramps up (6 deg/s, max 2 deg) until it moves, then is dropped."""
+    STILL_PTP, STILL_N, RAMP, BOOST_MAX, OUTSIDE = 0.0015, 12, 6.0, 2.0, 1.0
+
+    def reset(self):
+        super().reset()
+        self.hist, self.boost = [], 0.0
+
+    def action(self, goal, pos, vel, dt=None, radius=0.012):
+        a = super().action(goal, pos, vel, dt, radius)
+        rel = np.asarray(goal, dtype=float) - np.asarray(pos, dtype=float)
+        d = float(np.hypot(*rel))
+        self.hist = (self.hist + [np.asarray(pos, dtype=float).copy()])[-self.STILL_N:]
+        H = np.array(self.hist)
+        still = len(H) == self.STILL_N and np.ptp(H[:, 0]) < self.STILL_PTP and np.ptp(H[:, 1]) < self.STILL_PTP
+        if still and d > self.OUTSIDE * radius:
+            self.boost = min(self.BOOST_MAX, self.boost + self.RAMP * (dt or self.DT))
+        elif not still:
+            self.boost = 0.0
+        if self.boost > 0:
+            a = np.clip(a + (rel / max(d, 1e-6)) * self.boost / 5.0, -1.0, 1.0)
+        return a
