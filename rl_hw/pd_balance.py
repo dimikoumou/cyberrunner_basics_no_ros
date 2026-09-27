@@ -293,6 +293,8 @@ def _sigterm(*_):
 
 def main():
     _single_instance_or_exit()
+    if os.environ.get("PD_UI") == "1":
+        os.environ.setdefault("PLATE_OPEN_LOOP_LEVEL", "1")   # env init levels to the fixed position too
     signal.signal(signal.SIGTERM, _sigterm)
     total_steps = int(sys.argv[1]) if len(sys.argv) > 1 else 6000
     max_episodes = int(sys.argv[2]) if len(sys.argv) > 2 else 15
@@ -1030,7 +1032,8 @@ def main():
                     action = np.zeros(2, dtype=np.float32)   # stopped: hold the plate level
                     phase, kick, move = "idle", np.zeros(2), None
                 # ball not seen, or elevator running -> the fixed level position (open loop)
-                env.hold_level = ui is not None and (not last_found or (elevator is not None and elevator.on))
+                env.hold_level = ui is not None and (not running or not last_found
+                                                     or (elevator is not None and elevator.on))
                 if env.hold_level:
                     action = np.zeros(2, dtype=np.float32)
                     phase, kick, move = "idle", np.zeros(2), None

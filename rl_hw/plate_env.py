@@ -120,6 +120,12 @@ MAX_TICKS_PER_STEP = 250
 # the elevator runs (2026-09-27, user: "just bring it level when ball not found").
 # The camera-closed-loop level once chased a wrong pose to the tick limits.
 LEVEL_TICKS = {1: int(os.environ.get("PLATE_LEVEL_M1", "2952")), 3: int(os.environ.get("PLATE_LEVEL_M3", "2812"))}
+# The tilt servo trusts the camera only if its reading roughly agrees with the motor
+# position (LEVEL_TICKS + TICKS_PER_DEG): a ball right beside a plate marker makes the
+# reading wrong AND unresponsive, and the servo then ran motor 3 to its limit (3800) in
+# ~1 s. Hard band: never further than TILT_BAND_DEG from the level position.
+TILT_TRUST_DEG = 3.0
+TILT_BAND_DEG = 6.5
 TICK_BOUNDS = {1: (1800, 3900), 3: (700, 3800)}  # where each axis's angle plateaus (measured)
 LEVEL_TOL_DEG = 0.4
 # Delay-aligned correction (research workflow 2026-09-26, Smith-predictor idea):
@@ -270,6 +276,7 @@ class HardwarePlateEnv(gym.Env):
         self._cmd_ticks = {}           # last commanded goal position per motor (tilt_control)
         self._tilt_target = LEVEL_OFFSET_DEG  # last target (alpha, beta) in degrees
         self._meas_tilt = None          # last plausible measured (alpha, beta) in degrees
+        self._ticks_hist = {}           # dxl_id -> recent commanded ticks (to compare with the delayed camera)
         self._target_hist = []          # recent (alpha, beta) targets, newest last
         self._last_commanded_action = np.zeros(2, dtype=np.float32)
         self._pos_history = []
@@ -358,6 +365,8 @@ class HardwarePlateEnv(gym.Env):
             startup[m1_id], startup[m3_id] = int(cached["m1"]), int(cached["m3"])
         except (OSError, KeyError, ValueError):
             pass
+        if os.environ.get("PLATE_OPEN_LOOP_LEVEL") == "1":
+            startup.update(LEVEL_TICKS)          # the fixed, measured level position
         for dxl_id, target in startup.items():
             set_position(self.port_handler, self.packet_handler, dxl_id, target)
             self._cmd_ticks[dxl_id] = int(target)
@@ -691,11 +700,20 @@ class HardwarePlateEnv(gym.Env):
             tpd = TICKS_PER_DEG[dxl_id]
             d = min(TILT_MEAS_DELAY_STEPS[dxl_id], len(self._target_hist) - 1)
             target_then = self._target_hist[-1 - d][i]
-            delta = (target[i] - self._tilt_target[i]) * tpd + TILT_GAIN * (target_then - meas[i]) * tpd
+            delta = (target[i] - self._tilt_target[i]) * tpd
+            hist = self._ticks_hist.setdefault(dxl_id, [])
+            ticks_then = hist[-1 - d] if len(hist) > d else self._cmd_ticks.get(dxl_id, LEVEL_TICKS[dxl_id])
+            expected = LEVEL_OFFSET_DEG[i] + (ticks_then - LEVEL_TICKS[dxl_id]) / tpd
+            if abs(meas[i] - expected) < TILT_TRUST_DEG:     # camera agrees with the motor -> correct
+                delta += TILT_GAIN * (target_then - meas[i]) * tpd
             delta = float(np.clip(delta, -MAX_TICKS_PER_STEP, MAX_TICKS_PER_STEP))
             lo, hi = TICK_BOUNDS[dxl_id]
+            band = abs(TILT_BAND_DEG * tpd)
+            lo, hi = max(lo, int(LEVEL_TICKS[dxl_id] - band)), min(hi, int(LEVEL_TICKS[dxl_id] + band))
             pos = int(np.clip(self._cmd_ticks.get(dxl_id, (lo + hi) // 2) + delta, lo, hi))
             self._cmd_ticks[dxl_id] = pos
+            hist.append(pos)
+            del hist[:-12]
             set_position(self.port_handler, self.packet_handler, dxl_id, pos)
         self._tilt_target = target
 
@@ -739,6 +757,7 @@ class HardwarePlateEnv(gym.Env):
         """plate straight to the fixed level position (LEVEL_TICKS), no camera involved"""
         for dxl_id, pos in LEVEL_TICKS.items():
             self._cmd_ticks[dxl_id] = pos
+            self._ticks_hist[dxl_id] = [pos] * 12
             set_position(self.port_handler, self.packet_handler, dxl_id, pos)
         self._tilt_target = LEVEL_OFFSET_DEG
         self._target_hist = [LEVEL_OFFSET_DEG] * 12
@@ -777,7 +796,7 @@ class HardwarePlateEnv(gym.Env):
             set_position(self.port_handler, self.packet_handler, motor_id, pos)
 
     def _recenter_motors(self):
-        if getattr(self, "open_loop_level", False):
+        if getattr(self, "open_loop_level", os.environ.get("PLATE_OPEN_LOOP_LEVEL") == "1"):
             self._level_open_loop()
             return
         if self.tilt_control:
@@ -789,7 +808,7 @@ class HardwarePlateEnv(gym.Env):
             set_position(self.port_handler, self.packet_handler, motor_id, center_pos)
 
     def _level_plate(self, tolerance_deg=0.5, max_iters=20, max_step=150, settle_s=0.8, quick=False):
-        if getattr(self, "open_loop_level", False):
+        if getattr(self, "open_loop_level", os.environ.get("PLATE_OPEN_LOOP_LEVEL") == "1"):
             self._level_open_loop()
             time.sleep(0.5)
             return
