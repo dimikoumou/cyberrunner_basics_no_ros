@@ -107,6 +107,29 @@ def pixel_to_plate(env, row, col):
     return np.array([float(xm[0]), float(xm[1])]) if np.all(np.isfinite(xm[:2])) else None
 
 
+def plate_to_pixel(env, xy, guess=(180.0, 320.0), iters=6):
+    """Plate point (x, y) m -> image pixel (row, col) in the 640x360 frame: numerical
+    inverse of pixel_to_plate (Newton steps with a finite-difference Jacobian), so it
+    uses exactly the same camera model. None if the pose is not available."""
+    rc = np.array(guess, dtype=float)
+    xy = np.asarray(xy, dtype=float)
+    for _ in range(iters):
+        p = pixel_to_plate(env, rc[0], rc[1])
+        pr = pixel_to_plate(env, rc[0] + 1.0, rc[1])
+        pc = pixel_to_plate(env, rc[0], rc[1] + 1.0)
+        if p is None or pr is None or pc is None:
+            return None
+        J = np.column_stack([pr - p, pc - p])          # d(plate)/d(row, col)
+        try:
+            step = np.linalg.solve(J, xy - p)
+        except np.linalg.LinAlgError:
+            return None
+        rc = rc + np.clip(step, -200, 200)
+        if np.hypot(*step) < 0.05:
+            break
+    return rc
+
+
 def inside_region(polygon, xy, margin=0.0):
     """True if plate point xy lies inside the polygon (plate metres), at least
     `margin` metres from its edge. Falls back to False for a degenerate polygon."""

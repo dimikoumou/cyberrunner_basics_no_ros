@@ -47,6 +47,7 @@ async function state() {
     document.getElementById('s').innerHTML =
       `<b>${s.running ? 'balancing' : 'stopped'}</b> · ${s.controller || 'classic'} · ` +
       `ball ${s.ball ? '(' + mm(s.ball[0]) + ', ' + mm(s.ball[1]) + ')' : '<b>not visible</b>'} · ` +
+      `target ${s.goal ? '(' + mm(s.goal[0]) + ', ' + mm(s.goal[1]) + '), r ' + mm(s.goal_r) : '–'} · ` +
       `distance ${s.dist != null ? mm(s.dist) : '–'} · in target ${s.in_target ? 'yes' : 'no'} · ` +
       `elevator ${s.elev_on ? '<b>on</b>' : 'off'}` + (s.hole_msg ? ' · ' + s.hole_msg : '');
   } catch (e) { document.getElementById('s').textContent = 'controller not reachable'; }
@@ -82,7 +83,7 @@ class H(BaseHTTPRequestHandler):
             elif u.path == "/state":
                 with urllib.request.urlopen(SRC + "/state", timeout=3) as r:
                     s = json.load(r)
-                keep = ("running", "controller", "ball", "dist", "in_target", "elev_on", "hole_msg", "mode")
+                keep = ("running", "controller", "ball", "goal", "goal_r", "dist", "in_target", "elev_on", "hole_msg", "mode")
                 self._send(200, json.dumps({k: s.get(k) for k in keep}).encode(), "application/json")
             else:
                 self._send(404, b"not found", "text/plain")

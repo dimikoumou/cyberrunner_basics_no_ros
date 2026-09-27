@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 from plate_env import HardwarePlateEnv  # noqa: E402
+from goal_circle import plate_to_pixel  # noqa: E402
 from goal_circle import (detect_goal_circle, detect_on_frame, save_debug, save_last_goal,  # noqa: E402
                          pixel_to_plate, inside_region)
 from ui_server import UIServer, FRAME_W, FRAME_H  # noqa: E402
@@ -473,6 +474,12 @@ def main():
     def set_target(center, radius, polygon=None, contour_px=None, px=None, r_px=None, why="", from_xy=None):
         """adopt_goal, but routed round the holes: via points first, then the target"""
         nonlocal vias, final_target
+        if px is None and ui is not None:
+            # scripted / programmatic targets: find where to draw the target circle
+            rc = plate_to_pixel(env, center)
+            rc2 = plate_to_pixel(env, (center[0] + radius, center[1]), guess=rc) if rc is not None else None
+            if rc is not None and rc2 is not None:
+                px, r_px = (float(rc[1]), float(rc[0])), float(np.hypot(*(rc2 - rc)))
         final_target = (center, radius, polygon, contour_px, px, r_px, why)
         vias = detour(holes, from_xy, center) if (holes and from_xy is not None) else []
         if vias:
