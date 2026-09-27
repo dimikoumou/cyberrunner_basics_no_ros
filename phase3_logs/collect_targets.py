@@ -51,8 +51,10 @@ def main():
             break
         ctrl = ctrls[(i // BLOCK) % len(ctrls)]
         if i % BLOCK == 0:
-            cmd(cmd="controller", which=ctrl)
-            cmd(cmd="hybrid", on=(ctrl == "classic"))
+            # "odil+settle" / "learned+settle" = the policy with the classic near-field settle
+            base = ctrl.split("+")[0]
+            cmd(cmd="controller", which=base)
+            cmd(cmd="hybrid", on=(base == "classic" or ctrl.endswith("+settle")))
             time.sleep(0.5)
         s = get()
         while s.get("ball") is None:          # ball lost / being reloaded: wait
