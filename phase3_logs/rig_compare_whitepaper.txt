@@ -28,3 +28,12 @@ IndexError: index 0 is out of bounds for axis 0 with size 0
 -0.028,0.023:0.019,-0.040,0.012: start 78mm | moves 1 (early end 0), hops before arrival 0, pulses 0 | arrived 1.3s | after: max 10mm, in target 100%, final 9.0mm | jerk 0.0001
 -0.080,-0.031:-0.045,0.028,0.008: start 76mm | moves 787 (early end 0), hops before arrival 22, pulses 0 | arrived nans | after: max nanmm, in target 0%, final 75.2mm | jerk 0.0001
 -0.032,0.029:0.076,0.023,0.012: start 101mm | moves 1 (early end 0), hops before arrival 0, pulses 0 | arrived 1.2s | after: max 12mm, in target 100%, final 4.5mm | jerk 0.0005
+=== ODIL v4 + classic settle (hybrid) ===
+0.012,-0.066:-0.079,-0.014,0.008: start 98mm | moves 1 (early end 0), hops before arrival 0, pulses 0 | arrived 1.4s | after: max 9mm, in target 99%, final 7.3mm | jerk 0.0012
+0.079,-0.075:0.074,0.029,0.012: start 103mm | moves 1 (early end 0), hops before arrival 0, pulses 0 | arrived 1.5s | after: max 11mm, in target 100%, final 3.2mm | jerk 0.0014
+0.045,-0.051:0.014,0.026,0.008: start 85mm | moves 787 (early end 0), hops before arrival 1, pulses 0 | arrived nans | after: max nanmm, in target 0%, final 83.8mm | jerk 0.0000
+0.082,-0.073:-0.064,0.056,0.012: start 196mm | moves 1 (early end 0), hops before arrival 0, pulses 3 | arrived 4.2s | after: max 13mm, in target 95%, final 6.4mm | jerk 0.0070
+0.059,-0.023:-0.058,0.018,0.008: start 122mm | moves 1 (early end 0), hops before arrival 0, pulses 0 | arrived 1.8s | after: max 6mm, in target 100%, final 2.8mm | jerk 0.0005
+-0.028,0.023:0.019,-0.040,0.012: start 80mm | moves 1 (early end 0), hops before arrival 0, pulses 3 | arrived 1.4s | after: max 18mm, in target 94%, final 2.5mm | jerk 0.0031
+-0.080,-0.031:-0.045,0.028,0.008: start 69mm | moves 3 (early end 0), hops before arrival 1, pulses 2 | arrived 3.0s | after: max 14mm, in target 94%, final 5.8mm | jerk 0.0031
+-0.032,0.029:0.076,0.023,0.012: start 116mm | moves 1 (early end 0), hops before arrival 0, pulses 0 | arrived 1.3s | after: max 8mm, in target 100%, final 1.8mm | jerk 0.0008
