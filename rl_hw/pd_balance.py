@@ -1003,6 +1003,10 @@ def main():
                 if not running:
                     action = np.zeros(2, dtype=np.float32)   # stopped: hold the plate level
                     phase, kick, move = "idle", np.zeros(2), None
+                if not last_found:
+                    # ball not seen (fell into a hole, hidden, or a dropped frame): level the
+                    # plate at once instead of holding the last tilt (closed-loop step to level)
+                    action = np.zeros(2, dtype=np.float32)
                 obs, reward, terminated, truncated, info = env.step(action)
                 if rl_ctrl is not None:
                     rl_ctrl.record_applied(env._last_commanded_action)
