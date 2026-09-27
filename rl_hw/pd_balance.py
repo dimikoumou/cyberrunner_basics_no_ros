@@ -533,6 +533,8 @@ def main():
         if started and elevator.on:
             elevator.stop("stopped: ball reloaded" if seen >= RELOAD_SEEN_FRAMES else "stopped: reload gave up")
         elevator.units, elevator.direction = units0, dir0
+        if ui is not None:
+            ui.set_state(**elevator.state())
         dt_ = time.time() - t0
         print(f"reload {'done' if seen >= RELOAD_SEEN_FRAMES else 'FAILED'} after {dt_:.1f} s")
         return seen >= RELOAD_SEEN_FRAMES, dt_
@@ -546,6 +548,15 @@ def main():
     xb = yb = 0.0
     lost_xy = None
     lost_since, lost_alerted = None, False
+    if ui is not None:
+        env.recover_tilts = False            # ball missing -> plate stays level (no recovery tilts)
+
+    def on_wait_tick():
+        track_lost(False)
+        if elevator is not None:
+            elevator.poll()
+            ui.set_state(**elevator.state(), ball=None)
+    env.on_wait_tick = on_wait_tick
 
     def track_lost(found):
         """alert once when the ball has been out of sight for LOST_ALERT_S"""

@@ -1155,6 +1155,14 @@ class HardwarePlateEnv(gym.Env):
         while not ball_found:
             time.sleep(self.dt)
             waited += self.dt
+            if getattr(self, "on_wait_tick", None) is not None:
+                self.on_wait_tick()          # e.g. the controller's ball-lost alert timer / UI
+            if not getattr(self, "recover_tilts", True):
+                # 2026-09-27 (user): while the ball is missing the plate stays LEVEL -- no
+                # recovery tilts (a lost ball is under the plate / out, not in a corner)
+                self._write_action(np.zeros(2, dtype=np.float32))
+                xb, yb, alpha, beta, ball_found = self._read_state()
+                continue
             if waited - last_log >= LOG_EVERY_S:
                 print(f"[HardwarePlateEnv] still waiting for the ball to become visible "
                       f"({waited:.0f}s) -- likely stuck on a corner marker or under the "
