@@ -15,7 +15,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "rl_sim")))
-from plate_goal_env import build_obs, ACTION_SCALE, N_HIST  # noqa: E402
+from plate_goal_env import build_obs, ACTION_SCALE, N_HIST, POLICY_RATE  # noqa: E402
 
 
 class NumpyPolicy:
@@ -45,7 +45,9 @@ class RigPolicyController:
     def action(self, goal, radius, pos, vel, alpha_rad, beta_rad):
         tilt = np.array([np.degrees(beta_rad) - self.b0, -(np.degrees(alpha_rad) - self.a0)])
         obs = build_obs(goal, radius, np.asarray(pos), np.asarray(vel), tilt, self.hist)
-        return self.policy(obs) * ACTION_SCALE      # what goes to env.step()
+        a = self.policy(obs) * ACTION_SCALE
+        prev = self.hist[-1]
+        return np.clip(a, prev - POLICY_RATE, prev + POLICY_RATE)   # same rate limit as in training
 
     def record_applied(self, applied):
         """call after env.step() with env._last_commanded_action"""

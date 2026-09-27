@@ -27,7 +27,12 @@ N_HIST = 4
 # Weight of the action-change penalty. v1 used 0.05 and converged to bang-bang control
 # (15-28x the PD baseline's action jerk) -- the opposite of the smooth motion wanted
 # on the rig. 1.0 puts smoothness on the same scale as being inside the target.
-SMOOTH_COEF = float(__import__("os").environ.get("PLATE_SMOOTH_COEF", "1.0"))
+SMOOTH_COEF = float(__import__("os").environ.get("PLATE_SMOOTH_COEF", "0.3"))
+# Hard limit on how fast the POLICY may change its command (per step). v2 (penalty 1.0)
+# still dithered (~15x the PD baseline's jerk): shaking keeps the ball out of the
+# paper dimple in sim, but on the rig it's a vibrating plate. 0.1/step = 0.5 deg/step,
+# full swing 0 -> 0.8 in ~0.3 s. Applied identically on the rig (rl_hw/rl_policy.py).
+POLICY_RATE = float(__import__("os").environ.get("PLATE_POLICY_RATE", "0.1"))
 
 
 def build_obs(goal, radius, pos, vel, tilt_deg, act_hist):
@@ -70,7 +75,7 @@ class PlateGoalEnv(gym.Env):
     def step(self, action):
         a = np.clip(np.asarray(action, dtype=float), -1, 1) * ACTION_SCALE
         prev = self.applied
-        self.applied = np.clip(a, prev - MAX_ACTION_DELTA, prev + MAX_ACTION_DELTA)
+        self.applied = np.clip(a, prev - min(MAX_ACTION_DELTA, POLICY_RATE), prev + min(MAX_ACTION_DELTA, POLICY_RATE))
         dt = float(np.clip(self.rng.normal(DT_NOM, 0.003), 0.028, 0.045))
         pos, vel, tilt, found = self.sim.step(5.0 * self.applied, dt=dt)
         self.pos, self.vel, self.tilt = pos, vel, tilt

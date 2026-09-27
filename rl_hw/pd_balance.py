@@ -199,6 +199,13 @@ def trapezoid(D, vmax, amax):
         return D - 0.5 * amax * td * td, amax * td, -amax
     return T, f
 LINE_TOL = 0.008  # line mode: on-line tolerance (m)
+# Hybrid (2026-09-27): the learned policy is great at the approach (one smooth ~1-2 s glide,
+# no hops) but makes small jerky corrections near the target and sometimes settles just
+# outside it. It drives until the ball is within HANDOVER of the target, then the classic
+# near-field control (damping, learned local slope, stiction pulses) settles and holds.
+# Hysteresis: back to the policy only if the ball is pushed out beyond HANDBACK.
+HANDOVER_R_SCALE, HANDOVER_MIN = 2.5, 0.025
+HANDBACK_SCALE = 2.5
 KP_LINE, KD_LINE = 8.0, 2.5            # tracking feedback on the moving route reference
 LINE_BOOST_RATE, LINE_BOOST_MAX = 1.0, 0.6  # breakaway push along the route when the ball won't follow
 LINE_JOIN_M = 0.015                    # route following starts once the ball is this close to it
@@ -301,6 +308,7 @@ def main():
         os.path.dirname(__file__), "..", "rl_sim", "runs", "plate_goal_v3", "policy.npz"))
     rl_ctrl = RigPolicyController(policy_path, LEVEL_OFFSET_DEG) if os.path.exists(policy_path) else None
     use_policy = bool(os.environ.get("PD_POLICY")) and rl_ctrl is not None
+    policy_driving = True     # within the hybrid: True = policy approach, False = classic near field
     if rl_ctrl is not None:
         print(f"learned policy available: {policy_path}" + (" (ACTIVE)" if use_policy else ""))
     move, move_request, n_moves = None, False, 0
@@ -375,7 +383,7 @@ def main():
         """Switch the controller to a new target (sheet re-detection or a UI click)."""
         nonlocal goal, goal_tol, goal_polygon, goal_contour_px, goal_px, goal_r_px, edge_x, edge_y
         nonlocal hold_start, phase, kick, lockout_until, goal_provisional, n_goal_changes, move, move_request
-        nonlocal integ, rest_since
+        nonlocal integ, rest_since, policy_driving
         goal = (float(center[0]), float(center[1]))
         goal_tol = float(radius)
         goal_polygon, goal_contour_px, goal_px, goal_r_px = polygon, contour_px, px, r_px
@@ -392,6 +400,7 @@ def main():
         goal_cands.clear()
         goal_provisional = False
         move, move_request = None, True
+        policy_driving = True
         b = bias_for(goal)
         if b is not None:
             integ = np.clip(b, -I_MAX, I_MAX)   # start from what this spot is known to need
@@ -661,7 +670,8 @@ def main():
                     kick = np.zeros(2)
                 kicking = phase != "idle"
                 # the integral learns the level bias only from a rolling ball, never stiction
-                if running and move is None and not line_active and dist_now < I_ZONE and not kicking and not stationary:
+                if (running and move is None and not line_active and not (use_policy and policy_driving)
+                        and dist_now < I_ZONE and not kicking and not stationary):
                     integ = np.clip(integ + KI * e * dt_real, -I_MAX, I_MAX)
                 v_ref = (kp / kd) * e
                 v_ref_mag = float(np.hypot(*v_ref))
@@ -750,8 +760,19 @@ def main():
                 # actually freed the ball from this specific spot. Let the wedge
                 # detector fire and do its job instead of masking it.
                 if use_policy and running and mode not in ("line", "path"):
-                    action = rl_ctrl.action(goal, goal_tol, (xb, yb), (vx, vy), alpha, beta).astype(np.float32)
-                    move, phase, kick = None, "idle", np.zeros(2)
+                    handover = max(HANDOVER_MIN, HANDOVER_R_SCALE * goal_tol)
+                    if policy_driving and dist_now < handover:
+                        policy_driving = False
+                        move, move_request, phase = None, False, "idle"
+                        pos_buf.clear()
+                        print(f"  hybrid: near field at {dist_now * 1000:.0f} mm -> classic settle")
+                    elif not policy_driving and dist_now > HANDBACK_SCALE * handover:
+                        policy_driving = True
+                        rl_ctrl.reset()
+                        print(f"  hybrid: ball {dist_now * 1000:.0f} mm out -> policy approach")
+                    if policy_driving:
+                        action = rl_ctrl.action(goal, goal_tol, (xb, yb), (vx, vy), alpha, beta).astype(np.float32)
+                        move, move_request, phase, kick = None, False, "idle", np.zeros(2)
                 if not running:
                     action = np.zeros(2, dtype=np.float32)   # stopped: hold the plate level
                     phase, kick, move = "idle", np.zeros(2), None
@@ -799,7 +820,8 @@ def main():
                 elif ball_found or info["status"] == "ball_lost":
                     hold_start = None
                 if ui is not None:
-                    ui.set_state(running=running, mode=mode,
+                    ui.set_state(controller=("learned" if policy_driving else "learned+classic settle") if use_policy else "classic",
+                                 running=running, mode=mode,
                                  ball=[float(obs[0]), float(obs[1])] if ball_found else None,
                                  goal=[goal[0], goal[1]], goal_r=goal_tol,
                                  dist=(line_off if (mode in ("line", "path") and follower is not None) else dist) if ball_found else None,

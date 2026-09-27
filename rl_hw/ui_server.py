@@ -103,6 +103,7 @@ PAGE = """<!doctype html>
           <dt>Distance</dt><dd id="s_dist">–</dd>
           <dt>In target</dt><dd id="s_in">–</dd>
           <dt>Hold</dt><dd id="s_hold">–</dd>
+          <dt>Controller</dt><dd id="s_ctrl">–</dd>
           <dt>Loop</dt><dd id="s_hz">–</dd>
         </dl>
       </div>
@@ -143,13 +144,15 @@ async function poll() {
     $('m_path').classList.toggle('on', s.mode === 'path');
     $('pathrow').style.display = s.mode === 'path' ? 'flex' : 'none';
     $('c_classic').classList.toggle('on', s.controller !== 'learned');
-    $('c_learned').classList.toggle('on', s.controller === 'learned');
+    $('c_learned').classList.toggle('on', (s.controller || '').startsWith('learned'));
     $('s_ball').textContent = s.ball ? `(${mm(s.ball[0])}, ${mm(s.ball[1])})` : 'not visible';
     $('s_goal').textContent = s.goal ? `(${mm(s.goal[0])}, ${mm(s.goal[1])}), r ${mm(s.goal_r)}` : 'none';
     $('s_dist').textContent = s.dist != null ? mm(s.dist) : '–';
     $('s_in').innerHTML = s.in_target ? '<span class="ok">yes</span>' : 'no';
     $('s_hold').textContent = s.hold != null ? s.hold.toFixed(1) + ' s' : '–';
     $('s_hz').textContent = s.hz ? s.hz.toFixed(0) + ' Hz' : '–';
+    $('s_ctrl').textContent = s.controller === 'learned' ? 'learned (approach)'
+      : s.controller === 'learned+classic settle' ? 'classic (near-field settle)' : 'classic';
     $('hint').textContent = s.mode === 'click' ? 'Click the board to send the ball there'
       : s.mode === 'path' ? (s.line_msg || 'Click points to draw a path, then press Go')
       : s.mode === 'line' ? (s.line_msg || 'Following the red line')
