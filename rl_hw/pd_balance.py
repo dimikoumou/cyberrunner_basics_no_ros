@@ -224,8 +224,6 @@ VIA_REACH = 0.02                       # this close to a via point -> head for t
 RELOAD_TIMEOUT_S = 90.0                # ball lost near a hole: run the elevator this long at most
 RELOAD_TIMEOUT_OTHER_S = 15.0          # lost elsewhere (e.g. hidden in a corner): shorter, then the gentle recovery
 RELOAD_UNITS = int(os.environ.get("PD_RELOAD_UNITS", "328"))      # elevator speed for a reload (~75 rpm)
-UNJAM_AFTER_S = 10.0                   # ball not back this long -> it is caught under the board: unjam, then every 10 s
-UNJAM_TILT = 1.0                       # slow full tilt (action units, 5 deg) toward each side in turn, held
 RELOAD_SEEN_FRAMES = 5                 # ball visible on the paper this many frames in a row = reloaded
 GOAL_TOLERANCE = 0.0455
 # Direct feedback while watching this live: correcting X and Y together lets the
@@ -484,7 +482,8 @@ def main():
 
     def reload_ball(timeout):
         """The ball is lost (fell into a hole): run the elevator at RELOAD_UNITS, forward,
-        only until the ball is back on the paper, then stop it. -> (reloaded, seconds)."""
+        only until the ball is back on the paper, then stop it. The plate stays LEVEL the
+        whole time the elevator runs (user rule). -> (reloaded, seconds)."""
         t0, seen, units0, dir0 = time.time(), 0, elevator.units, elevator.direction
         elevator.units, elevator.direction = RELOAD_UNITS, 1     # not saved: the UI setting stays
         if elevator.on:
@@ -495,25 +494,11 @@ def main():
         print(f"ball lost -- running the elevator at {elevator.units} units until it is back")
         env._servo_level(max_s=3.0)          # level the plate first (closed loop on the camera)
         level = np.zeros(2, dtype=np.float32)
-        next_unjam, n_unjam = UNJAM_AFTER_S, 0
-        tilt_dirs = [np.array(d, dtype=np.float32) for d in ((1, 0), (0, 1), (-1, 0), (0, -1))]
         while time.time() - t0 < timeout:
-            if timeout >= RELOAD_TIMEOUT_S and time.time() - t0 > next_unjam and elevator.on:
-                # caught under the board on its way to the elevator: tilt the whole board
-                # slowly to one side (ramped over 1 s, no jolt) and hold, so it rolls on
-                d = tilt_dirs[n_unjam % 4]
-                n_unjam += 1
-                print(f"  ball not back after {time.time() - t0:.0f} s -- unjam {n_unjam}: slow tilt {tuple(d)}")
-                # ramp up over 1 s, hold 2.5 s, ramp down over 1 s -- always with camera
-                # feedback in between (the tilt servo is closed loop on the measured tilt)
-                for k in list(range(1, 11)) + [10] * 25 + list(range(9, -1, -1)):
-                    env._hold_tilt((d * UNJAM_TILT * k / 10).astype(np.float32), 0.1)
-                env._servo_level(max_s=3.0)
-                next_unjam = time.time() - t0 + UNJAM_AFTER_S
             env._write_action(level)               # one closed-loop levelling step per frame: stays level
             xr, yr, _, _, found = env._read_state()
-            ok = (found and abs(xr) < env._x_half - 0.003 and abs(yr) < env._y_half - 0.003
-                  and near_hole(holes, (xr, yr), extra=-HOLE_MARGIN_M) is None)
+            # back = seen anywhere on the plate (corners too), just not inside the hole
+            ok = found and near_hole(holes, (xr, yr), extra=-HOLE_MARGIN_M) is None
             seen = seen + 1 if ok else 0
             track_lost(found)
             elevator.poll()
@@ -530,8 +515,8 @@ def main():
             if seen >= RELOAD_SEEN_FRAMES or (started and not elevator.on):
                 break
             time.sleep(0.03)
-        if started and elevator.on:
-            elevator.stop("stopped: ball reloaded" if seen >= RELOAD_SEEN_FRAMES else "stopped: reload gave up")
+        if started:
+            elevator.stop_verified("stopped: ball reloaded" if seen >= RELOAD_SEEN_FRAMES else "stopped: reload gave up")
         elevator.units, elevator.direction = units0, dir0
         if ui is not None:
             ui.set_state(**elevator.state())
@@ -1045,6 +1030,9 @@ def main():
                 if not running:
                     action = np.zeros(2, dtype=np.float32)   # stopped: hold the plate level
                     phase, kick, move = "idle", np.zeros(2), None
+                if elevator is not None and elevator.on:
+                    action = np.zeros(2, dtype=np.float32)   # elevator running -> plate level (user rule)
+                    phase, kick, move = "idle", np.zeros(2), None
                 if not last_found:
                     # ball not seen (fell into a hole, hidden, or a dropped frame): level the
                     # plate at once instead of holding the last tilt (closed-loop step to level)
@@ -1180,10 +1168,12 @@ def main():
               f"~{rate:.1f} steps/s overall, log: {log_path} ===")
     finally:
         log.close()
-        if elevator is not None and elevator.on:
+        if elevator is not None:
+            # always (not only if we think it is on): a stop interrupted mid-packet by
+            # the shutdown signal once left it running at 320 after the controller exited
             try:
-                elevator.stop("stopped: controller shut down")
-            except Exception as e:
+                elevator.stop_verified("stopped: controller shut down")
+            except BaseException as e:
                 print(f"elevator stop failed: {e}")
         env.close()
 

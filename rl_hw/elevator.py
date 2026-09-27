@@ -84,6 +84,23 @@ class Elevator:
             self.on = False
             self.msg = why
 
+    def stop_verified(self, why="stopped", tries=5):
+        """stop, then read back until the motor reports speed 0 and torque off (a write
+        can be lost on the shared serial line)"""
+        for _ in range(tries):
+            try:
+                self.port.clearPort()
+            except Exception:
+                pass
+            self.stop(why)
+            time.sleep(0.15)
+            vel, r1, _ = self.ph.read4ByteTxRx(self.port, ELEV_ID, ADDR_PRESENT_VEL)
+            tq, r2, _ = self.ph.read1ByteTxRx(self.port, ELEV_ID, ADDR_TORQUE)
+            if r1 == 0 and r2 == 0 and tq == 0 and abs(_s32(vel)) < 5:
+                return True
+        print("[elevator] WARNING: could not confirm the elevator stopped")
+        return False
+
     def poll(self):
         """read speed/current ~1x per second; switch off on stall or hardware error"""
         now = time.time()
