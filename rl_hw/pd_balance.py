@@ -473,7 +473,8 @@ def main():
             elevator.start()
         started = True
         print(f"ball lost -- running the elevator at {elevator.units} units until it is back")
-        env._write_action(np.zeros(2, dtype=np.float32))
+        env._servo_level(max_s=3.0)          # level the plate first (closed loop on the camera)
+        level = np.zeros(2, dtype=np.float32)
         next_unjam, n_unjam = UNJAM_AFTER_S, 0
         tilt_dirs = [np.array(d, dtype=np.float32) for d in ((1, 0), (0, 1), (-1, 0), (0, -1))]
         while time.time() - t0 < timeout:
@@ -483,17 +484,13 @@ def main():
                 d = tilt_dirs[n_unjam % 4]
                 n_unjam += 1
                 print(f"  ball not back after {time.time() - t0:.0f} s -- unjam {n_unjam}: slow tilt {tuple(d)}")
-                for k in range(1, 21):
-                    env._write_action(d * UNJAM_TILT * k / 20)
-                    time.sleep(0.05)
-                t_hold = time.time()
-                while time.time() - t_hold < 2.5:
-                    env._read_state()
-                    time.sleep(0.03)
-                for k in range(19, -1, -1):
-                    env._write_action(d * UNJAM_TILT * k / 20)
-                    time.sleep(0.05)
+                # ramp up over 1 s, hold 2.5 s, ramp down over 1 s -- always with camera
+                # feedback in between (the tilt servo is closed loop on the measured tilt)
+                for k in list(range(1, 11)) + [10] * 25 + list(range(9, -1, -1)):
+                    env._hold_tilt((d * UNJAM_TILT * k / 10).astype(np.float32), 0.1)
+                env._servo_level(max_s=3.0)
                 next_unjam = time.time() - t0 + UNJAM_AFTER_S
+            env._write_action(level)               # one closed-loop levelling step per frame: stays level
             xr, yr, _, _, found = env._read_state()
             ok = (found and abs(xr) < env._x_half - 0.003 and abs(yr) < env._y_half - 0.003
                   and near_hole(holes, (xr, yr), extra=-HOLE_MARGIN_M) is None)
