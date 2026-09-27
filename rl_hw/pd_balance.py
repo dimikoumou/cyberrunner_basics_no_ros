@@ -151,6 +151,51 @@ class PlateMap:
         return float((w * self.static[ok]).sum() / w.sum()) if ok.any() else None
 GOAL_CHECK_S = 0.5
 CLICK_R = 0.012   # target radius for a clicked point (m)
+# Planned moves (2026-09-26, user: "one or two smooth motions, then balancing"): the
+# hop-hop approach came from the ball slowing down, sinking into the paper and
+# sticking, then being pushed free again. Instead, for targets more than MOVE_MIN_M
+# away, plan ONE move -- accelerate, cruise, brake to a stop at the target (trapezoid
+# speed profile) -- break the ball free once, then feed the planned acceleration +
+# rolling friction forward so it keeps rolling the whole way, with light tracking
+# feedback. If it still stops short, a second move is planned. The stiction pulses
+# remain only for the last ~2 cm.
+MOVE_MIN_M = 0.02
+V_MOVE, A_MOVE = 0.10, 0.10     # m/s, m/s^2
+ACC_PER_ACTION = 0.45           # m/s^2 per unit action (0.09 m/s^2/deg x 5 deg)
+A_ROLL_FF = 0.03                # m/s^2 rolling friction to feed forward while moving
+KP_MOVE, KD_MOVE = 6.0, 2.5     # tracking feedback on the planned path (action per m, per m/s)
+MOVE_BOOST_RATE, MOVE_BOOST_MAX = 1.0, 0.7   # breakaway ramp (action/s, cap)
+MOVE_ABORT_M = 0.035            # tracking error that ends the move (replanned if needed)
+# Learned local level (2026-09-26): after a move got the ball to the target it often
+# rolled back down a gentle local slope (~0.5 deg; the paper isn't flat), because the
+# slow integral hadn't learned that spot yet. When the ball has rested in a target
+# for BIAS_LEARN_S, the integral IS the local level there: store it per plate cell
+# (persisted) and start from it whenever a new target lands in that cell.
+BIAS_TABLE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "bias_table.json"))
+BIAS_CELL_M = 0.03
+BIAS_LEARN_S = 1.0
+
+
+def trapezoid(D, vmax, amax):
+    """Rest-to-rest speed profile over distance D: returns (T, f(t) -> (s, v, a))."""
+    t_acc = vmax / amax
+    if D < vmax * t_acc:                     # triangular
+        t_acc = np.sqrt(D / amax)
+        vmax = amax * t_acc
+        t_flat = 0.0
+    else:
+        t_flat = (D - vmax * t_acc) / vmax
+    T = 2 * t_acc + t_flat
+
+    def f(t):
+        t = min(max(t, 0.0), T)
+        if t < t_acc:
+            return 0.5 * amax * t * t, amax * t, amax
+        if t < t_acc + t_flat:
+            return 0.5 * amax * t_acc ** 2 + vmax * (t - t_acc), vmax, 0.0
+        td = T - t
+        return D - 0.5 * amax * td * td, amax * td, -amax
+    return T, f
 LINE_TOL = 0.008  # line mode: the carrot's "target radius" and the on-line tolerance (m)
 GOAL_CONFIRM = 3
 GOAL_AGREE_M = 0.004
@@ -244,6 +289,25 @@ def main():
     running = ui is None           # with the UI, wait for Start (or a click)
     mode = "sheet"
     follower, line_off, line_msg = None, None, ""
+    move, move_request, n_moves = None, False, 0
+    try:
+        with open(BIAS_TABLE_PATH) as f:
+            bias_table = {tuple(int(v) for v in k.split(",")): np.array(val) for k, val in json.load(f).items()}
+    except (OSError, ValueError):
+        bias_table = {}
+    rest_since = None
+
+    def bias_cell(xy):
+        return (int(round(xy[0] / BIAS_CELL_M)), int(round(xy[1] / BIAS_CELL_M)))
+
+    def bias_for(xy):
+        """stored local level for the cell of xy (or the mean of its stored neighbours)"""
+        c = bias_cell(xy)
+        if c in bias_table:
+            return bias_table[c].copy()
+        near = [bias_table[(c[0] + i, c[1] + j)] for i in (-1, 0, 1) for j in (-1, 0, 1)
+                if (c[0] + i, c[1] + j) in bias_table]
+        return np.mean(near, axis=0) if near else None
     if os.environ.get("PD_GOAL"):
         # virtual goal for testing: PD_GOAL="x,y,r" in metres; disables live re-detection
         gx_, gy_, gr_ = (float(v) for v in os.environ["PD_GOAL"].split(","))
@@ -296,7 +360,8 @@ def main():
     def adopt_goal(center, radius, polygon=None, contour_px=None, px=None, r_px=None, why=""):
         """Switch the controller to a new target (sheet re-detection or a UI click)."""
         nonlocal goal, goal_tol, goal_polygon, goal_contour_px, goal_px, goal_r_px, edge_x, edge_y
-        nonlocal hold_start, phase, kick, lockout_until, goal_provisional, n_goal_changes
+        nonlocal hold_start, phase, kick, lockout_until, goal_provisional, n_goal_changes, move, move_request
+        nonlocal integ, rest_since
         goal = (float(center[0]), float(center[1]))
         goal_tol = float(radius)
         goal_polygon, goal_contour_px, goal_px, goal_r_px = polygon, contour_px, px, r_px
@@ -312,6 +377,11 @@ def main():
         pos_buf.clear()
         goal_cands.clear()
         goal_provisional = False
+        move, move_request = None, True
+        b = bias_for(goal)
+        if b is not None:
+            integ = np.clip(b, -I_MAX, I_MAX)   # start from what this spot is known to need
+        rest_since = None
         n_goal_changes += 1
         print(f"\n>>> NEW GOAL ({why}): centre ({goal[0]:+.4f}, {goal[1]:+.4f}) m, radius {goal_tol * 1000:.1f} mm <<<\n")
 
@@ -320,6 +390,10 @@ def main():
     n_goal_changes = 0
     t_start = time.time()
     integ = np.zeros(2)
+    b0 = bias_for(goal)
+    if b0 is not None:
+        integ = np.clip(b0, -I_MAX, I_MAX)
+    move_request = True   # plan the first move right away (no-op if already close)
     pos_buf = deque(maxlen=STUCK_WIN)
     kick = np.zeros(2)
     kicking = False
@@ -456,7 +530,17 @@ def main():
                     # Pulses work anywhere on the plate: with the approach speed capped, a
                     # STILL ball far from the goal only gets kd*V_REF_MAX = 0.16 (0.8 deg),
                     # below the ~2 deg breakaway -- it sat 11 cm away for a whole run.
-                    if phase == "idle":
+                    if move is None and mode != "line" and running and dist_now > MOVE_MIN_M and (
+                            move_request or (stationary and phase == "idle" and t_now >= lockout_until)):
+                        u_m = e / max(dist_now, 1e-6)
+                        T_m, prof = trapezoid(dist_now, V_MOVE, A_MOVE)
+                        move = {"u": u_m, "start": np.array([xb, yb]), "D": dist_now, "T": T_m, "prof": prof,
+                                "t0": None, "boost": 0.0, "t_plan": t_now}
+                        move_request, phase, n_moves = False, "idle", n_moves + 1
+                        print(f"  move {n_moves}: {dist_now * 1000:.0f} mm, planned {T_m:.1f} s")
+                    if move is not None:
+                        pass  # the planned move owns the ball; pulses wait
+                    elif phase == "idle":
                         if stationary and dist_now > R_DONE and t_now >= lockout_until:
                             u = e / max(dist_now, 1e-6)
                             d0, start_pos = dist_now, np.array([xb, yb])
@@ -500,7 +584,7 @@ def main():
                     kick = np.zeros(2)
                 kicking = phase != "idle"
                 # the integral learns the level bias only from a rolling ball, never stiction
-                if running and dist_now < I_ZONE and not kicking and not stationary:
+                if running and move is None and dist_now < I_ZONE and not kicking and not stationary:
                     integ = np.clip(integ + KI * e * dt_real, -I_MAX, I_MAX)
                 v_ref = (kp / kd) * e
                 v_ref_mag = float(np.hypot(*v_ref))
@@ -516,6 +600,39 @@ def main():
                     np.array([pd[0] + integ[0] + kick[0] + ff[0], pd[1] + integ[1] + kick[1] + ff[1]], dtype=np.float32),
                     -0.8, 0.8,
                 )
+                if move is not None and running:
+                    pos, vel = np.array([xb, yb]), np.array([vx, vy])
+                    um = move["u"]
+                    if move["t0"] is None:
+                        # break free once: planned initial push + a slowly growing boost
+                        move["boost"] = min(MOVE_BOOST_MAX, move["boost"] + MOVE_BOOST_RATE * dt_real)
+                        push = (A_MOVE + A_ROLL_FF) / ACC_PER_ACTION + move["boost"]
+                        a_move = um * push + integ
+                        adv = float(np.dot(pos - move["start"], um))
+                        if adv > 0.002 or float(np.dot(vel, um)) > 0.015:
+                            # it rolls: start the plan where its speed/position match
+                            v_now = max(float(np.dot(vel, um)), 0.0)
+                            t_m = min(v_now / A_MOVE, move["T"] / 2)
+                            s_m = move["prof"](t_m)[0]
+                            move["t0"] = t_now - t_m
+                            move["start"] = pos - um * s_m
+                        elif t_now - move["t_plan"] > 3.0:
+                            move = None      # couldn't break free: leave it to the pulses
+                    if move is not None and move["t0"] is not None:
+                        tm = t_now - move["t0"]
+                        s_r, v_r, a_r = move["prof"](tm)
+                        p_ref = move["start"] + um * s_r
+                        ff_m = (a_r + (A_ROLL_FF if v_r > 0.005 else 0.0)) / ACC_PER_ACTION
+                        a_move = um * ff_m + KP_MOVE * (p_ref - pos) + KD_MOVE * (um * v_r - vel) + integ
+                        err = float(np.hypot(*(p_ref - pos)))
+                        if tm > move["T"] or err > MOVE_ABORT_M:
+                            if err > MOVE_ABORT_M:
+                                print(f"  move {n_moves} ended early (tracking error {err * 1000:.0f} mm)")
+                            move = None
+                            lockout_until = t_now + 0.3
+                            pos_buf.clear()
+                    if move is not None:
+                        action = np.clip(np.asarray(a_move, dtype=np.float32), -0.8, 0.8)
                 # Hard override once near an edge -- full brake straight back toward
                 # center on whichever axis is in danger, overriding the blended 2D
                 # goal-seeking above. Without this the combined X+Y correction can
@@ -546,7 +663,7 @@ def main():
                 # detector fire and do its job instead of masking it.
                 if not running:
                     action = np.zeros(2, dtype=np.float32)   # stopped: hold the plate level
-                    phase, kick = "idle", np.zeros(2)
+                    phase, kick, move = "idle", np.zeros(2), None
                 obs, reward, terminated, truncated, info = env.step(action)
                 dist = float(np.hypot(obs[6], obs[7]))
                 # Only a frame where the ball was actually detected counts: during
@@ -561,6 +678,22 @@ def main():
                     in_circle = ball_found and dist < goal_tol
                 ep_in_circle += int(in_circle)
                 ep_steps += 1
+                # learn the local level where the ball rests in the target
+                if running and move is None and ball_found and dist < R_DONE and phase == "idle" \
+                        and np.hypot(obs[2], obs[3]) < 0.01:
+                    rest_since = rest_since or time.time()
+                    if time.time() - rest_since > BIAS_LEARN_S:
+                        c = bias_cell(goal)
+                        old = bias_table.get(c)
+                        bias_table[c] = integ.copy() if old is None else 0.5 * old + 0.5 * integ
+                        rest_since = time.time() + 1e9  # once per rest
+                        try:
+                            with open(BIAS_TABLE_PATH, "w") as f:
+                                json.dump({f"{k[0]},{k[1]}": v.tolist() for k, v in bias_table.items()}, f)
+                        except OSError:
+                            pass
+                else:
+                    rest_since = None if not (rest_since and rest_since > time.time()) else rest_since
 
                 now = time.time()
                 # A lone missed detection neither extends nor breaks a hold (the
@@ -584,7 +717,7 @@ def main():
                 log.write(f"{now - t_start:.3f},{episode},{i},{obs[0]:.5f},{obs[1]:.5f},{obs[2]:.4f},"
                           f"{obs[3]:.4f},{obs[4]:.5f},{obs[5]:.5f},{dist:.5f},{int(in_circle)},{int(ball_found)},"
                           f"{action[0]:.3f},{action[1]:.3f},{info['status']},"
-                          f"{integ[0]:.4f},{integ[1]:.4f},{kick[0]:.4f},{kick[1]:.4f},{PHASE_CODE[phase]},"
+                          f"{integ[0]:.4f},{integ[1]:.4f},{kick[0]:.4f},{kick[1]:.4f},{4 if move is not None else PHASE_CODE[phase]},"
                           + (",".join(f"{v:.1f}" for v in env.last_inner_corners.ravel())
                              if getattr(env, "last_inner_corners", None) is not None else ",,,,,,,")
                           + f",{goal[0]:.5f},{goal[1]:.5f},{goal_tol:.5f}\n")

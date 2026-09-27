@@ -1199,6 +1199,18 @@ class HardwarePlateEnv(gym.Env):
             time.sleep(self.dt - elapsed)
 
         xb, yb, alpha, beta, ball_found = self._read_state()
+        # Detection-glitch filter (2026-09-26): a ball resting in the target "jumped"
+        # 11 mm in one frame; the phantom ~0.3 m/s velocity made the D term slam the
+        # plate to full tilt and really threw the ball into a corner. A jump larger
+        # than the ball's recent motion can explain is treated as a missed frame
+        # (last position held, like any not-found frame); fast real motion still
+        # passes because the allowance grows with the previous speed.
+        if ball_found and self._prev_t is not None and np.all(np.isfinite(self._prev_ball)):
+            jump = float(np.hypot(xb - self._prev_ball[0], yb - self._prev_ball[1]))
+            allow = max(0.012, 3.0 * getattr(self, "_prev_speed", 0.0) * max(time.time() - self._prev_t, self.dt) + 0.006)
+            if jump > allow:
+                print(f"[HardwarePlateEnv] ignoring implausible ball jump of {jump * 1000:.0f} mm")
+                ball_found = False
         self._step_count += 1
         self._lost_count = 0 if ball_found else self._lost_count + 1
 
@@ -1251,6 +1263,7 @@ class HardwarePlateEnv(gym.Env):
         self._prev_t = now
         vx = (xb - self._prev_ball[0]) / dt_meas
         vy = (yb - self._prev_ball[1]) / dt_meas
+        self._prev_speed = float(np.hypot(vx, vy))
         self._prev_ball = np.array([xb, yb], dtype=np.float32)
 
         dist = float(np.hypot(self.goal[0] - xb, self.goal[1] - yb))
