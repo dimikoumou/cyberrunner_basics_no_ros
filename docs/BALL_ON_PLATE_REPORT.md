@@ -1,0 +1,204 @@
+# CyberRunner ball-on-plate — full report
+
+*Branch `ball-on-plate`, work of 2026-09-26/27. How to run everything: [`rl_hw/HOW_TO_RUN.md`](../rl_hw/HOW_TO_RUN.md).
+Short project history in [`REPORT.md`](../REPORT.md); this document is the complete account of the
+ball-on-plate work: what was found, what worked, what failed, and why.*
+
+---
+
+## 1. Goal and starting point
+
+**Initial goal:** put the steel ball on the plate and hold it inside a red goal circle for at
+least 10 s with `rl_hw/pd_balance.py` (no maze, no RL).
+**Grew into:** a ball that goes to *any* red region, a clicked point, or along a drawn line —
+in one smooth motion and then stays — with a web UI and a learned (RL) controller.
+
+**The rig**
+
+| Item | Fact |
+|---|---|
+| Tilt motors | Dynamixel **IDs 1 and 3** (ID 2 = ball-reload elevator, never commanded) |
+| Surface | Glass removed; **paper** on the frame (the old bezel ledge that trapped the ball is gone) |
+| Camera | See3CAM_24CUG, 1920×1080, processed at 640×360; **requested at 30 fps** |
+| Markers | 4 outer (fixed frame) + 4 inner (tilting plate) blue dots |
+| Plate half-extents | 0.1417 × 0.1192 m |
+| Control loop | ~22 Hz originally, ~29 Hz after the camera fix (vision-bound) |
+| Tilt range (measured) | beta (motor 3) −8.4…+10.6°, alpha (motor 1) +6.2…−5.6° |
+
+---
+
+## 2. Results at a glance
+
+| Milestone | Result |
+|---|---|
+| First 10 s hold (Phase 3 goal) | **10.03 s**, 225/225 frames detected, max 4.27 mm inside a 45.5 mm disc |
+| Resting in the middle (classic) | median **2.6 mm** from centre, **260 s** hold, 98.6 % in circle |
+| Small 9 mm dot (open space) | 100 % in target, 0 exits after arrival |
+| Smooth planned moves (classic) | most 10–14 cm trips in **one motion**, 98–100 % in target after arrival |
+| Line following | 4 cm loop: **8.7 laps/min**, median **6.6 mm** off the line (carrot follower: 1.1 laps/min) |
+| Draw-a-path (UI) | 22 cm L-path driven to the end, holding 6 mm from it |
+| RL simulator calibration | 1-s replay error **3.4 / 4.3 mm** at 0.5 / 1 s (baseline “stays put”: 12.9 / 20.5 mm) |
+| RL v3 in sim (200 episodes) | **92 %** reach vs **65 %** for PD; 1.00 s vs 1.34 s; 70 % vs 28 % inside afterwards |
+| RL v3 on the rig (zero-shot) | 3/3 trips: 1.2–2.2 s, no hops, 100 % in target afterwards |
+
+---
+
+## 3. What we discovered (root causes, with evidence)
+
+### Vision
+- **Pipeline runs at 640×360**, not 1920×1080 — an early blob-area diagnosis was wrong by 9×
+  because it was measured at full resolution (retracted; see §5).
+- **Left outer markers are intermittently half-hidden** by a strip of the tilting frame
+  (history-dependent). A half marker leaves ~5 px of blue, detection jumps to a wrong blob and the
+  camera pose comes out ~30° off (rotation diagonal 0.86). → **Outer 4 corners cached once**
+  (`state_est/fixed_corners_cache.json`, 4 clean frames within 1.3 px); inner 4 tracked live.
+- **HSV retuned from sampled pixels:** corners hue 104–140; ball hue 80–108, sat ≥ 100. On bare
+  paper the ball casts a **bluish shadow** that the old range merged into the ball; over the red
+  disc the ball's rim mixes with red (hue tail to 120): maxHue 104 → 108 took detection on the disc
+  from 50/52 to 52/52 snapshots and removed ball-lost resets.
+- **Red-goal detection pitfalls:** a filled disc needs an outer-edge fit (all-pixel fit gave 33 px
+  for a 55 px disc); **wooden-frame speckles** out-sized small dots → search restricted to the paper
+  quad; **the ball covering a small dot** biased the fit (9.0 mm read as 5.9–7.4 mm, centre 3 mm
+  off) → occluded views ignored, last clean goal reused.
+- **Camera problems:** requesting **55 fps** gave ~1 s image delay after a USB re-plug (43 fps with
+  internal buffering) — **30 fps gives ~0.15 s**. The camera index moves (0↔1) on re-plug →
+  auto-select by resolution. The camera **froze twice** (listed by macOS, no frames) — needs a
+  physical re-plug; a watchdog now reopens it while running.
+- **Detection glitch:** a resting ball “jumped” 11 mm in one frame; the phantom ~0.3 m/s velocity
+  made the D-term slam the plate and threw the ball into a corner → jump filter.
+
+### Actuation / dynamics
+- **Axes are swapped vs. the old code:** motor 1 (alpha) moves the ball in **y**, motor 3 (beta)
+  in **x** (tilt probe: alpha −2.6° → dy +0.04–0.05 m, dx ≈ 0).
+- **Open-loop tick→angle map is not repeatable** on motor 3 (same tick read +5.4° and −1.7° at
+  different times) → **closed-loop tilt servo** on camera-measured angles (`_servo_tilt`).
+- **Level point:** camera-0° ≠ gravity level; fitted from ball acceleration vs tilt (r ≈ 0.98) at
+  beta ≈ +2.4…+3.0°, alpha ≈ −0.8…−1.4°, **drifting 0.3–0.5° between runs** → offset + integral.
+- **Velocity bug:** velocity was divided by 1/55 s while the loop ran at ~22 Hz → D-term 2.4×
+  too strong (drove a ~1.45 Hz limit cycle). Fixed with real dt: 52–67 % → **88 %** in circle.
+- **Tilt-servo gain 0.5 was above the stability limit** (~0.445 for a 2–3 step lag): the plate
+  shook ±5° at ~2 Hz. 0.25 → jitter 4.98° → 0.19°, ball still 67 % of frames, **89 s** hold;
+  0.15 after the 30 fps change (loop ~29 Hz, lag 4–5 steps).
+- **Delay misalignment:** the servo compared the current target with a 4–5-step-old camera tilt
+  (a −0.9° brake arrived as −2.1…−2.4°). Comparing with the target active when the frame was taken
+  (Smith-predictor idea): beta tracking error 0.60 → **0.29°**.
+- **Paper stiction:** a still ball sinks into the paper — breakaway **~1.5–2.4°** vs rolling
+  **~0.3–0.6°** — causing stick-slip hunting and hops.
+- **Local slopes:** the paper isn't flat (~0.5° at typical spots; plate map: local level
+  −0.8…+1.0°, breakaway 0.7…3.7°). **Near the frame** the paper grips much harder (top edge
+  3.4–3.9°, sometimes > 4.5°).
+- **Two controllers on one U2D2:** one crashed (“multiple access on port”) and its shutdown
+  switched torque off → the other showed “running” with dead motors → single-instance lock.
+
+---
+
+## 4. What worked (in order)
+
+| # | Change | Effect (measured) |
+|---|---|---|
+| 1 | Cached outer corners, HSV from pixels, closed-loop tilt servo, axis fix, level offset | first stable balancing; 0 → 2.11 s holds |
+| 2 | Integral term (bias), ball hue 108 | **10.03 s** hold (Phase 3 success) |
+| 3 | Real-dt velocity | 88 % in circle, median 26.6 mm |
+| 4 | Servo gain 0.25 | 89 s hold, plate jitter 0.19° |
+| 5 | **Ramp-kick & release** (integral learns only while rolling; kick dropped on motion) | **99.4 %**, median 4.4 mm |
+| 6 | Done-zone 8 mm (don't kick a resting ball) | **median 2.6 mm, 260 s** |
+| 7 | 30 fps camera + servo gain 0.15 | back to 98.4 %, 150 s after the camera delay problem |
+| 8 | Auto goal detection, live sheet swap, any-shape regions (distance-transform deepest point) | new sheets without code edits |
+| 9 | Capped approach speed (8 cm/s) | small dot: 22–28 % → 40 % in target |
+| 10 | Delay-aligned servo | small dot: 40 → **58 %**, median 2.1 mm |
+| 11 | **Timed pulse + planned brake** (Yang & Tomizuka adaptive pulse width, per 3 cm cell, persisted) | small dot: **82 %**, exits 11 → 2.2/min |
+| 12 | Pulses anywhere (+ stronger ceiling 0.9) | big circle 100 %, 0 exits; small open-space target 100 %, 0 kicks |
+| 13 | **Planned trapezoid moves** + friction feedforward | one smooth motion instead of hops |
+| 14 | **Learned local level per cell** (`bias_table.json`) + glitch filter | 6 trips: 4 in one motion, 98–100 % in target after arrival in 5/6 |
+| 15 | Web UI: sheet / click / line / draw-path modes, controller toggle | click → ball there in < 2 s |
+| 16 | **Smooth line following** (moving reference, tangential + centripetal feedforward) | 8.7 laps/min, 6.6 mm (was 1.1 laps/min) |
+| 17 | **RL**: calibrated sim, PPO v3 with policy rate limit | zero-shot on the rig (below) |
+| 18 | **Hybrid**: RL approach, classic near-field settle (handover 2.5× radius, min 2.5 cm) | in testing with the user |
+
+### RL vs classic on the rig — 8 random trips (seed 2027)
+
+| Trip | Target r | Classic: arrived / in target | RL v3: arrived / in target (final) |
+|---|---|---|---|
+| 1 | 8 mm | 2.4 s / 100 % | 1.4 s / 98 % (7.0 mm) |
+| 2 | 12 mm | 6.0 s / 37 % (6 moves) | 1.2 s / 1 % (13.7 mm, just outside) |
+| 3 | 8 mm | 2.8 s / 100 % | 1.2 s / 100 % (3.4 mm) |
+| 4 | 12 mm | 4.1 s / 91 % | 1.4 s / 100 % (2.6 mm) |
+| 5 | 8 mm | 3.4 s / 96 % | 1.6 s / 12 % (8.5 mm, just outside) |
+| 6 | 12 mm | 0.9 s / 68 % | 1.0 s / 100 % (3.0 mm) |
+| 7 | 8 mm | 1.2 s / 95 % | never arrived (stuck 31 mm away) |
+| 8 | 12 mm | 5.2 s / 66 % | 1.9 s / 54 % (12.4 mm) |
+
+**Reading:** RL approaches faster and in one motion every time (1.0–1.9 s, no hops); classic
+settles more precisely but needs several moves on half the trips. RL's weaknesses are the last
+millimetres (no slope memory, can't nudge a stuck ball) and near-field jitter (action jerk
+~0.015 vs ~0.001–0.01 classic) — hence the hybrid.
+
+---
+
+## 5. What failed or was reverted (and why)
+
+| Tried | Outcome | Why / what we learned |
+|---|---|---|
+| Unstick/“violent shake” escapes | removed | only needed for the old glass ledge; vibration can drop the U2D2 |
+| Symmetric open-loop tick map | replaced | tick→angle not repeatable → closed loop |
+| `MAX_CORNER_AREA` diagnosis | **wrong**, reverted | areas measured at 1920×1080, pipeline runs at 640×360 |
+| Blaming a slipping motor-3 linkage | **wrong call**, retracted | user: hardware is sound; the effect was handled in software (closed-loop tilt) |
+| `I_MAX` 0.3 → 0.6 | reverted | stick-slip: breaks away at 1.5–2 deg and overshoots 50–80 mm; 88.8 → 76.8 % |
+| Capture zone with KD 6 near target | reverted | no gain (23 % vs 30 %); overshoot came from kick energy, not damping |
+| Plate-map feedforward | off by default | made the near-edge dot worse; map noisy near edges |
+| Braking-curve speed limit alone | no fix | the overshoot wasn't arrival speed but edge-zone stiction + wall slams |
+| Full-tilt (±1.0) wall guard | replaced | launched the ball at 140–160 mm/s → recurring ~46 mm overshoots |
+| Gentle wall guard v1 | bug, fixed | it overrode stiction pulses → ball stuck at a sticky edge |
+| Tilt-jump rejection filter | reverted | rejected real readings; servo chased a stale angle → side-to-side swinging |
+| “Newest frame” drain | reverted | not the cause; the delay was the camera's 55 fps mode |
+| Carrot line follower | replaced | stick-slip hops at ~5 mm/s |
+| Delay-compensated Kalman filter | parked | better moving-ball prediction, but noisier at rest (6–8 vs 2.7 mm/s) — no stiction model |
+| Small dot **near the frame** (≤ 5 cm) | unsolved | 0–93 % depending on start; paper grips 2–3× harder there → **scope: targets ≥ 5 cm from the frame** |
+| First plate-map run | 4/30 points | simple positioning couldn't place a sticking ball; fixed by measuring where it stops (21 points) |
+| RL v1 (smooth coef 0.05) | not deployed | 90 % success but bang-bang (jerk 0.16–0.28) |
+| RL v2 (coef 1.0) | not deployed | 95 % success but still dithered (jerk ~0.16) — dithering beats stiction in sim |
+
+---
+
+## 6. Methods
+
+- **Measure first, one change at a time**, each judged on a long run with the same metrics
+  (in-circle %, median distance, longest hold, exits/kicks per minute, time to arrive).
+- **Multi-agent workflows** (analysts + skeptic) on run logs chose several changes (level
+  refit, servo gain, ramp-kick design panel, literature sweep).
+- **Literature used:** Yang & Tomizuka 1988 (adaptive pulse width under stiction); van de Wouw &
+  Leine 2012 (impulsive control with uncertain friction); Beerens et al. 2019 / Bisoffi et al. 2020
+  (reset-integral against stick-slip); Armstrong-Hélouvry et al. 1994 (friction survey); Smith
+  predictor / delayed-measurement alignment; Bi & D'Andrea, *CyberRunner* (ICRA 2024 — conditioning
+  on past actions for delay).
+- **RL:** `rl_sim/plate_sim.py` (tilt servo lag, camera delay/noise/dropouts, rolling friction,
+  rest-dependent stiction, random slope field, walls; domain-randomised), fitted by replaying rig
+  logs (`fit_plate_sim.py`); PPO (stable-baselines3, 8 envs) with the last 4 actions in the
+  observation and a hard 0.1/step policy rate limit; exported to numpy so the rig needs no PyTorch.
+
+---
+
+## 7. Current state
+
+- **Controllers:** classic (planned moves + near-field stiction handling + learned slopes);
+  learned RL v3; **hybrid** (RL approach → classic settle) — selectable in the UI.
+- **UI modes:** red region on sheet, click to target, follow red line, draw path.
+- **Safety/robustness:** single-instance lock, camera watchdog, glitch filter, proportional wall
+  guard, no shaking.
+- **Local learned files (not in git):** `bias_table.json`, `pulse_table.json`, `last_goal.json`,
+  `last_level_position.json`. The trained policy *is* in git: `rl_sim/runs/plate_goal_v3/policy.npz`.
+
+**Known limitations:** targets must be ≥ ~5 cm from the frame; the camera occasionally freezes
+and needs a re-plug; RL alone settles imprecisely on small targets; line tracking is looser on
+tight curves (S-line median ~13 mm off).
+
+## 8. Recommended next steps
+
+1. **“One motion, then stillness”:** tune the hybrid; RL v4 with reward for coming to rest in
+   the target, a learned slope memory (integral input) and more small-target training.
+2. **Optimal navigation via a discrete loss** (arXiv 2506.15902) adapted to the plate — being
+   explored as an alternative to RL.
+3. User's feature list: coloured dots (sequence/colour choice), UI extras (target size, speed,
+   learned-map overlay, keyboard/joystick), smoother line tracking on tight curves.
+4. Cleanup: remove dead code in `plate_env.py` (tick mapping, shake escapes, ledge comments);
+   near-frame zone revisited later; maze / sim-to-real maze work afterwards.
