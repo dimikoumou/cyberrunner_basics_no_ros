@@ -115,6 +115,37 @@ PULSE_LOCKOUT_S = 0.5
 PULSE_CELL_M = 0.03
 # learned per-cell pulse settings persist across runs (smooth from the first second)
 PULSE_TABLE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "pulse_table.json"))
+# Plate map (rl_hw/map_plate.py): per-area local level and breakaway tilt measured on
+# the rig. The paper is not uniform: the local "level" varies by ~1 deg across the
+# plate and breakaway between ~1.2 and 2.3 deg, which a single global offset and a
+# fixed first-pulse strength can't serve. Off by default if the file is missing.
+PLATE_MAP_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "plate_map.json"))
+USE_PLATE_MAP = os.environ.get("PD_PLATE_MAP", "0") == "1"  # off: made the near-edge dot worse (2026-09-26)
+
+
+class PlateMap:
+    """Inverse-distance-weighted interpolation of the measured map samples."""
+
+    def __init__(self, path):
+        with open(path) as f:
+            pts = json.load(f)["points"]
+        self.pos = np.array([p["pos"] for p in pts])
+        self.level = np.array([[p.get("level_x_deg") or 0.0, p.get("level_y_deg") or 0.0] for p in pts])
+        self.static = np.array([np.nanmean([v for v in (p.get("static_x_deg"), p.get("static_y_deg")) if v is not None]
+                                           or [np.nan]) for p in pts])
+
+    def _w(self, xy):
+        d = np.hypot(*(self.pos - np.asarray(xy)).T)
+        return 1.0 / np.maximum(d, 0.01) ** 2
+
+    def level_deg(self, xy):
+        w = self._w(xy)
+        return (w[:, None] * self.level).sum(0) / w.sum()
+
+    def static_deg(self, xy):
+        ok = np.isfinite(self.static)
+        w = self._w(xy)[ok]
+        return float((w * self.static[ok]).sum() / w.sum()) if ok.any() else None
 GOAL_CHECK_S = 0.5
 GOAL_CONFIRM = 3
 GOAL_AGREE_M = 0.004
@@ -128,6 +159,7 @@ GOAL_TOLERANCE = 0.0455
 # stop blending -- fully prioritize bringing THAT axis back first before resuming
 # normal 2D control, so the path runs through edge-middles, not corners.
 EDGE_X, EDGE_Y = 0.10, 0.085
+EDGE_PUSH_MIN, EDGE_PUSH_GAIN, EDGE_PUSH_MAX = 0.2, 20.0, 0.4  # action: 0.2 at the line, +0.1 per 5 mm, max 0.4 (2 deg)
 # One specific point (-0.15, +0.125) keeps recurring as a trap: a real V-notch
 # where the frame's two inner walls meet at a right angle -- UPDATE: a closer
 # zoomed photo showed this is actually a raised wooden bezel LEDGE where the
@@ -229,6 +261,10 @@ def main():
     last_found = True
     phase, ph_steps, u, d0, start_pos, cell, t_coast = "idle", 0, np.zeros(2), 0.0, None, None, 0.0
     pulse_table = {}
+    plate_map = None
+    if USE_PLATE_MAP and os.path.exists(PLATE_MAP_PATH):
+        plate_map = PlateMap(PLATE_MAP_PATH)
+        print(f"using plate map with {len(plate_map.pos)} samples ({PLATE_MAP_PATH})")
     try:
         with open(PULSE_TABLE_PATH) as f:
             pulse_table = {tuple(int(v) for v in k.split(",")): list(val) for k, val in json.load(f).items()}
@@ -283,7 +319,10 @@ def main():
                             u = e / max(dist_now, 1e-6)
                             d0, start_pos = dist_now, np.array([xb, yb])
                             cell = (int(round(xb / PULSE_CELL_M)), int(round(yb / PULSE_CELL_M)))
-                            pulse_table.setdefault(cell, [PULSE_A0, PULSE_N0])
+                            a0 = PULSE_A0
+                            if plate_map is not None and plate_map.static_deg((xb, yb)) is not None:
+                                a0 = float(np.clip(1.1 * plate_map.static_deg((xb, yb)) / 5.0, 0.3, PULSE_A_MAX))
+                            pulse_table.setdefault(cell, [a0, PULSE_N0])
                             phase, ph_steps = "pulse", 0
                     elif phase == "pulse":
                         ph_steps += 1
@@ -327,10 +366,12 @@ def main():
                 if v_ref_mag > v_allow:
                     v_ref *= v_allow / max(v_ref_mag, 1e-9)
                 pd = kd * (v_ref - np.array([vx, vy]))
+                # per-area level feedforward from the plate map (action units: 5 deg = 1)
+                ff = plate_map.level_deg((xb, yb)) / 5.0 if plate_map is not None else np.zeros(2)
                 if phase in ("pulse", "brake"):
                     pd = pd - np.dot(pd, u) * u  # the pulse/brake own the goal direction
                 action = np.clip(
-                    np.array([pd[0] + integ[0] + kick[0], pd[1] + integ[1] + kick[1]], dtype=np.float32),
+                    np.array([pd[0] + integ[0] + kick[0] + ff[0], pd[1] + integ[1] + kick[1] + ff[1]], dtype=np.float32),
                     -0.8, 0.8,
                 )
                 # Hard override once near an edge -- full brake straight back toward
@@ -338,10 +379,17 @@ def main():
                 # goal-seeking above. Without this the combined X+Y correction can
                 # point diagonally at a corner instead of cutting back through the
                 # middle of the edge it's near.
-                if abs(xb) > edge_x:
-                    action[0] = -1.0 if xb > 0 else 1.0
-                if abs(yb) > edge_y:
-                    action[1] = -1.0 if yb > 0 else 1.0
+                # Gentle, proportional wall guard (was a full +-1.0 = 5 deg slam, which
+                # shot the ball back across the plate at 140-160 mm/s every time it
+                # overshot toward the wall -- the recurring ~46 mm overshoots).
+                # It guarantees a MINIMUM push away from the wall but never caps a
+                # stronger one: a stiction pulse must still get through (overriding it
+                # left a ball stuck at the sticky top edge for a whole run).
+                for ax, pos, edge in ((0, xb, edge_x), (1, yb, edge_y)):
+                    if abs(pos) > edge:
+                        push = min(EDGE_PUSH_MAX, EDGE_PUSH_MIN + EDGE_PUSH_GAIN * (abs(pos) - edge))
+                        away = -np.sign(pos)
+                        action[ax] = away * max(push, away * action[ax])
                 # A dedicated trap-zone override was tried here (both a steady
                 # push and an in-loop oscillation toward the goal) and REMOVED --
                 # confirmed directly to be counterproductive, not just ineffective.
