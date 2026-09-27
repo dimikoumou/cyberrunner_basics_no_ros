@@ -172,3 +172,78 @@ class LineFollower:
             return self.path[(j + self.look) % self.n], off, False
         k = min(j + self.look, self.n - 1)
         return self.path[k], off, k == self.n - 1 and np.hypot(*(self.path[-1] - ball_xy)) < 0.01
+
+
+V_LINE, A_LINE = 0.04, 0.08    # m/s, m/s^2 along the route
+LAG_MAX = 0.025                # reference waits if the ball lags more than this (m)
+
+
+class PathTracker:
+    """Smooth route following (2026-09-26): instead of chasing a point ahead (the
+    ball crept along in stick-slip hops at ~5 mm/s), a reference point moves along
+    the route with a speed profile -- ramp up to V_LINE, and on an open route brake
+    to a stop at the end -- and the controller tracks it with the planned
+    acceleration fed forward (tangential + centripetal on curves) plus rolling
+    friction. If the ball falls behind by more than LAG_MAX the reference waits."""
+
+    def __init__(self, path, closed, ball_xy, v=V_LINE, a=A_LINE):
+        path = np.asarray(path, dtype=float)
+        ball_xy = np.asarray(ball_xy, dtype=float)
+        if not closed and np.hypot(*(path[-1] - ball_xy)) < np.hypot(*(path[0] - ball_xy)):
+            path = path[::-1]
+        self.closed, self.v_max, self.a_max = closed, v, a
+        pts = np.vstack([path, path[:1]]) if closed else path
+        seg = np.hypot(*np.diff(pts, axis=0).T)
+        self.S = np.concatenate([[0.0], np.cumsum(seg)])
+        self.pts, self.L = pts, float(self.S[-1])
+        # tangents and curvature vectors (dT/ds), lightly smoothed
+        d = np.gradient(pts, self.S, axis=0)
+        T = d / np.maximum(np.hypot(*d.T), 1e-9)[:, None]
+        k = np.gradient(T, self.S, axis=0)
+        ker = np.ones(5) / 5
+        self.T = T
+        self.K = np.column_stack([np.convolve(k[:, 0], ker, "same"), np.convolve(k[:, 1], ker, "same")])
+        self.s = self._project(ball_xy, None) if closed else 0.0
+        self.v = 0.0
+
+    def _interp(self, arr, s):
+        s = s % self.L if self.closed else min(max(s, 0.0), self.L)
+        return np.array([np.interp(s, self.S, arr[:, 0]), np.interp(s, self.S, arr[:, 1])])
+
+    def point(self, s):
+        return self._interp(self.pts, s)
+
+    def _project(self, xy, near_s, window=0.04):
+        d = np.hypot(*(self.pts - xy).T)
+        if near_s is not None:
+            ds = np.abs(self.S - (near_s % self.L if self.closed else near_s))
+            if self.closed:
+                ds = np.minimum(ds, self.L - ds)
+            d = np.where(ds <= window, d, np.inf)
+        return float(self.S[int(np.argmin(d))])
+
+    def off_line(self, xy):
+        return float(np.min(np.hypot(*(self.pts - np.asarray(xy)).T)))
+
+    def update(self, ball_xy, dt):
+        """-> dict(p, v, a, t_hat, lag, off, finished) for this control step."""
+        s_ball = self._project(np.asarray(ball_xy), self.s)
+        lag = self.s - s_ball
+        if self.closed:
+            lag = (lag + self.L / 2) % self.L - self.L / 2
+        v_des = self.v_max
+        if not self.closed:
+            v_des = min(v_des, float(np.sqrt(2 * self.a_max * max(self.L - self.s, 0.0))))
+        if lag > LAG_MAX:
+            v_des = 0.0  # wait for the ball
+        dv = float(np.clip(v_des - self.v, -self.a_max * dt, self.a_max * dt))
+        self.v = max(0.0, self.v + dv)
+        self.s = self.s + self.v * dt
+        if not self.closed:
+            self.s = min(self.s, self.L)
+        t_hat = self._interp(self.T, self.s)
+        t_hat = t_hat / max(np.hypot(*t_hat), 1e-9)
+        a = (dv / max(dt, 1e-3)) * t_hat + self.v ** 2 * self._interp(self.K, self.s)
+        finished = (not self.closed) and self.s >= self.L - 1e-4 and self.v < 1e-3
+        return {"p": self.point(self.s), "v": self.v * t_hat, "a": a, "t_hat": t_hat, "lag": lag,
+                "off": self.off_line(ball_xy), "finished": finished}

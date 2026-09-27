@@ -31,7 +31,7 @@ from plate_env import HardwarePlateEnv  # noqa: E402
 from goal_circle import (detect_goal_circle, detect_on_frame, save_debug, save_last_goal,  # noqa: E402
                          pixel_to_plate, inside_region)
 from ui_server import UIServer, FRAME_W, FRAME_H  # noqa: E402
-from line_path import detect_line, LineFollower  # noqa: E402
+from line_path import detect_line, PathTracker  # noqa: E402
 
 SNAPSHOT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pd_snapshots")
 SNAPSHOT_EVERY_S = float(os.environ.get("PD_SNAPSHOT_S", "2.0"))  # e.g. 30 for long unattended runs
@@ -196,7 +196,10 @@ def trapezoid(D, vmax, amax):
         td = T - t
         return D - 0.5 * amax * td * td, amax * td, -amax
     return T, f
-LINE_TOL = 0.008  # line mode: the carrot's "target radius" and the on-line tolerance (m)
+LINE_TOL = 0.008  # line mode: on-line tolerance (m)
+KP_LINE, KD_LINE = 8.0, 2.5            # tracking feedback on the moving route reference
+LINE_BOOST_RATE, LINE_BOOST_MAX = 1.0, 0.6  # breakaway push along the route when the ball won't follow
+LINE_JOIN_M = 0.015                    # route following starts once the ball is this close to it
 GOAL_CONFIRM = 3
 GOAL_AGREE_M = 0.004
 GOAL_MOVE_M = 0.008
@@ -289,6 +292,7 @@ def main():
     running = ui is None           # with the UI, wait for Start (or a click)
     mode = "sheet"
     follower, line_off, line_msg = None, None, ""
+    line_active, line_boost, line_ref = False, 0.0, None
     move, move_request, n_moves = None, False, 0
     try:
         with open(BIAS_TABLE_PATH) as f:
@@ -435,6 +439,7 @@ def main():
             ep_steps = 0
             for i in range(total_steps - total_taken):
                 xb, yb, vx, vy, alpha, beta, gx, gy = obs
+                dt_real_prev = min(time.time() - t_prev, 0.2) if t_prev is not None else 0.034
                 if ui is not None:
                     for c in ui.pop_commands():
                         kind = c.get("cmd")
@@ -449,7 +454,7 @@ def main():
                         elif kind == "mode" and c.get("mode") in ("sheet", "click", "line"):
                             mode = c["mode"]
                             live_goal = mode == "sheet"
-                            follower = None
+                            follower, line_active = None, False
                             ui.set_overlay(path_px=None)
                             ui.set_state(mode=mode)
                             if mode == "line" and getattr(env, "_last_frame", None) is not None:
@@ -458,7 +463,8 @@ def main():
                                     line_msg = "No red line found on the sheet"
                                     running = False
                                 else:
-                                    follower = LineFollower(ln["path"], ln["closed"], np.array([xb, yb]))
+                                    follower = PathTracker(ln["path"], ln["closed"], np.array([xb, yb]))
+                                    line_active, line_boost = False, 0.0
                                     line_msg = (f"{'Loop' if ln['closed'] else 'Line'} of {ln['length'] * 100:.0f} cm found"
                                                 f" -- press Start")
                                     goal_polygon = goal_contour_px = goal_px = goal_r_px = None
@@ -473,13 +479,19 @@ def main():
                                                ex["px"][2], "sheet")
                         elif kind == "test_line":
                             # synthetic route for testing the following without a sheet
-                            th = np.linspace(0, 2 * np.pi, 160, endpoint=False)
                             rr = float(c.get("r", 0.04))
-                            path = np.column_stack([rr * np.cos(th), rr * np.sin(th)])
+                            if c.get("shape") == "s":
+                                tt = np.linspace(0, 1, 200)
+                                path = np.column_stack([-0.06 + 0.12 * tt, 0.03 * np.sin(2 * np.pi * tt)])
+                                closed_ = False
+                            else:
+                                th = np.linspace(0, 2 * np.pi, 160, endpoint=False)
+                                path, closed_ = np.column_stack([rr * np.cos(th), rr * np.sin(th)]), True
                             mode, live_goal = "line", False
-                            follower = LineFollower(path, True, np.array([xb, yb]))
+                            follower = PathTracker(path, closed_, np.array([xb, yb]))
+                            line_active, line_boost = False, 0.0
                             goal_polygon = goal_contour_px = goal_px = goal_r_px = None
-                            line_msg = f"Test loop r={rr * 100:.0f} cm"
+                            line_msg = "Test S-line" if c.get("shape") == "s" else f"Test loop r={rr * 100:.0f} cm"
                             ui.set_state(mode=mode, line_msg=line_msg)
                             ui.set_overlay(path_px=None, contour_px=None)
                             running = True
@@ -494,18 +506,35 @@ def main():
                                 px_per_m = 10.0 / max(np.hypot(*(xy2 - xy)), 1e-6) if xy2 is not None else 1000.0
                                 adopt_goal(xy, CLICK_R, None, None, (col, row), CLICK_R * px_per_m, "click")
                                 running = True
-                if mode == "line" and follower is not None:
-                    tgt, line_off, finished = follower.target((xb, yb))
-                    goal, goal_tol = (float(tgt[0]), float(tgt[1])), LINE_TOL
-                    env.goal = np.array(goal, dtype=np.float32)
-                    env.fixed_goal, env.goal_tolerance = goal, goal_tol
+                line_ref = None
+                if mode == "line" and follower is not None and running:
+                    if not line_active:
+                        # join: bring the ball to the route's current reference point first
+                        # (a normal planned move), then start following
+                        join = follower.point(follower.s)
+                        line_off = follower.off_line((xb, yb))
+                        if np.hypot(*(join - np.array([xb, yb]))) < LINE_JOIN_M:
+                            line_active, move = True, None
+                        elif goal != (float(join[0]), float(join[1])):
+                            goal, goal_tol = (float(join[0]), float(join[1])), LINE_TOL
+                            env.goal = np.array(goal, dtype=np.float32)
+                            env.fixed_goal, env.goal_tolerance = goal, goal_tol
+                            move_request = True
+                    if line_active:
+                        line_ref = follower.update((xb, yb), max(dt_real_prev, 1e-3))
+                        line_off = line_ref["off"]
+                        goal, goal_tol = (float(line_ref["p"][0]), float(line_ref["p"][1])), LINE_TOL
+                        env.goal = np.array(goal, dtype=np.float32)
+                        env.fixed_goal, env.goal_tolerance = goal, goal_tol
+                        if line_ref["finished"]:
+                            line_active, line_ref = False, None  # hold at the end with normal balancing
+                            if line_msg != "Reached the end of the line":
+                                line_msg = "Reached the end of the line"
+                                print(line_msg)
+                                if ui is not None:
+                                    ui.set_state(line_msg=line_msg)
                     edge_x, edge_y = edge_limits(goal, goal_tol, quiet=True)
                     goal_px = goal_r_px = None
-                    if finished and line_msg != "Reached the end of the line":
-                        line_msg = "Reached the end of the line"
-                        print(line_msg)
-                        if ui is not None:
-                            ui.set_state(line_msg=line_msg)
                 if ui is not None or (mode == "line" and follower is not None):
                     gx, gy = goal[0] - xb, goal[1] - yb
                 dist_now = float(np.hypot(gx, gy))
@@ -530,7 +559,7 @@ def main():
                     # Pulses work anywhere on the plate: with the approach speed capped, a
                     # STILL ball far from the goal only gets kd*V_REF_MAX = 0.16 (0.8 deg),
                     # below the ~2 deg breakaway -- it sat 11 cm away for a whole run.
-                    if move is None and mode != "line" and running and dist_now > MOVE_MIN_M and (
+                    if move is None and not line_active and running and dist_now > MOVE_MIN_M and (
                             move_request or (stationary and phase == "idle" and t_now >= lockout_until)):
                         u_m = e / max(dist_now, 1e-6)
                         T_m, prof = trapezoid(dist_now, V_MOVE, A_MOVE)
@@ -540,7 +569,7 @@ def main():
                         print(f"  move {n_moves}: {dist_now * 1000:.0f} mm, planned {T_m:.1f} s")
                     if move is not None:
                         pass  # the planned move owns the ball; pulses wait
-                    elif phase == "idle":
+                    elif phase == "idle" and not line_active:
                         if stationary and dist_now > R_DONE and t_now >= lockout_until:
                             u = e / max(dist_now, 1e-6)
                             d0, start_pos = dist_now, np.array([xb, yb])
@@ -584,7 +613,7 @@ def main():
                     kick = np.zeros(2)
                 kicking = phase != "idle"
                 # the integral learns the level bias only from a rolling ball, never stiction
-                if running and move is None and dist_now < I_ZONE and not kicking and not stationary:
+                if running and move is None and not line_active and dist_now < I_ZONE and not kicking and not stationary:
                     integ = np.clip(integ + KI * e * dt_real, -I_MAX, I_MAX)
                 v_ref = (kp / kd) * e
                 v_ref_mag = float(np.hypot(*v_ref))
@@ -633,6 +662,17 @@ def main():
                             pos_buf.clear()
                     if move is not None:
                         action = np.clip(np.asarray(a_move, dtype=np.float32), -0.8, 0.8)
+                if line_ref is not None and running:
+                    pos, vel = np.array([xb, yb]), np.array([vx, vy])
+                    th_ = line_ref["t_hat"]
+                    if np.hypot(*vel) < 0.01 and line_ref["lag"] > 0.005:
+                        line_boost = min(LINE_BOOST_MAX, line_boost + LINE_BOOST_RATE * dt_real)
+                    else:
+                        line_boost = max(0.0, line_boost - 2 * LINE_BOOST_RATE * dt_real)
+                    ff_l = (line_ref["a"] + (A_ROLL_FF * th_ if np.hypot(*line_ref["v"]) > 0.005 else 0.0)) / ACC_PER_ACTION
+                    a_line = (ff_l + KP_LINE * (line_ref["p"] - pos) + KD_LINE * (line_ref["v"] - vel)
+                              + integ + line_boost * th_)
+                    action = np.clip(np.asarray(a_line, dtype=np.float32), -0.8, 0.8)
                 # Hard override once near an edge -- full brake straight back toward
                 # center on whichever axis is in danger, overriding the blended 2D
                 # goal-seeking above. Without this the combined X+Y correction can
