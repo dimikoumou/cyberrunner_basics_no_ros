@@ -5,7 +5,7 @@ cd "$(dirname "$0")/../rl_hw"
 for pair in "$@"; do
     start="${pair%%:*}"; target="${pair##*:}"
     PD_GOAL="$start,0.015" ../.venv/bin/python3 -u pd_balance.py 500 5 0 500 > /dev/null 2>&1
-    PD_GOAL="$target" ../.venv/bin/python3 -u pd_balance.py 800 5 0 800 > /tmp/move_run.log 2>&1; grep -E "  move |ended early|implausible ball jump" /tmp/move_run.log | head -6
+    PD_POLICY="$POLICY" PD_GOAL="$target" ../.venv/bin/python3 -u pd_balance.py 800 5 0 800 > /tmp/move_run.log 2>&1; grep -E "  move |ended early|implausible ball jump" /tmp/move_run.log | head -6
     F=$(ls -t pd_logs/*.csv | head -1)
     ../.venv/bin/python3 - "$F" "$pair" /tmp/move_run.log <<'PY'
 import csv, sys, numpy as np, re
@@ -21,9 +21,10 @@ for i in range(1,len(t)):
     run = run + (t[i]-t[i-1]) if still[i] else 0.0
     if still[i] and run>=0.3 and not (still[i-1] and run-(t[i]-t[i-1])>=0.3): hops+=1
 pulses=int(((ph[:-1]==0)&(ph[1:]==1)).sum())
+a0,a1=g("a0"),g("a1"); jerk=float(np.nanmean(np.diff(np.clip(a0,-1,1))**2+np.diff(np.clip(a1,-1,1))**2))
 post=t>ta if np.isfinite(ta) else np.zeros(len(t),bool)
 print(f"{sys.argv[2]}: start {1000*d[0]:.0f}mm | moves {moves} (early end {early}), hops before arrival {hops}, pulses {pulses} | "
       f"arrived {ta:.1f}s | after: max {1000*np.nanmax(d[post]) if post.any() else float('nan'):.0f}mm, "
-      f"in target {100*np.nanmean(d[post]<R) if post.any() else 0:.0f}%, final {1000*np.nanmedian(d[t>t[-1]-5]):.1f}mm")
+      f"in target {100*np.nanmean(d[post]<R) if post.any() else 0:.0f}%, final {1000*np.nanmedian(d[t>t[-1]-5]):.1f}mm | jerk {jerk:.4f}")
 PY
 done

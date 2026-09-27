@@ -298,7 +298,7 @@ def main():
     path_pts, path_px = [], []          # "Draw path" mode: clicked waypoints (plate m / image px)
     # learned controller (rl_sim/train_plate_ppo.py): PD_POLICY=<policy.npz> or UI toggle
     policy_path = os.environ.get("PD_POLICY") or os.path.abspath(os.path.join(
-        os.path.dirname(__file__), "..", "rl_sim", "runs", "plate_goal_v1", "policy.npz"))
+        os.path.dirname(__file__), "..", "rl_sim", "runs", "plate_goal_v3", "policy.npz"))
     rl_ctrl = RigPolicyController(policy_path, LEVEL_OFFSET_DEG) if os.path.exists(policy_path) else None
     use_policy = bool(os.environ.get("PD_POLICY")) and rl_ctrl is not None
     if rl_ctrl is not None:
