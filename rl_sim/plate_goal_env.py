@@ -24,6 +24,10 @@ START_X, START_Y = 0.12, 0.10
 R_RANGE = (0.008, 0.03)
 EP_STEPS = 450                        # ~15 s
 N_HIST = 4
+# Weight of the action-change penalty. v1 used 0.05 and converged to bang-bang control
+# (15-28x the PD baseline's action jerk) -- the opposite of the smooth motion wanted
+# on the rig. 1.0 puts smoothness on the same scale as being inside the target.
+SMOOTH_COEF = float(__import__("os").environ.get("PLATE_SMOOTH_COEF", "1.0"))
 
 
 def build_obs(goal, radius, pos, vel, tilt_deg, act_hist):
@@ -80,7 +84,7 @@ class PlateGoalEnv(gym.Env):
         still = np.hypot(*true_vel) < 0.01
         wall = abs(true_pos[0]) > 0.13 or abs(true_pos[1]) > 0.108
         r = (-d / 0.1 + (1.0 if inside else 0.0) + (0.5 if inside and still else 0.0)
-             - 0.05 * float(np.sum((self.applied - prev) ** 2)) - 0.01 * float(np.sum(self.applied ** 2))
+             - SMOOTH_COEF * float(np.sum((self.applied - prev) ** 2)) - 0.01 * float(np.sum(self.applied ** 2))
              - (0.5 if wall else 0.0))
         truncated = self.k >= EP_STEPS
         return self._obs(), r, False, truncated, {"dist": d, "inside": inside, "still": still}
