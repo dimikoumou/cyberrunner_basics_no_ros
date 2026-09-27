@@ -155,6 +155,30 @@ current physical state.
   The stick-slip handling: a still ball sinks into the paper and needs ~1.5–2.4° to break free. Now the integral learns only while the ball rolls; a separate ramp "kick" breaks it free and is dropped the moment it moves.
 - **Tried and reverted:** `I_MAX` 0.3 → 0.6 caused stick-slip overshoots (in circle fell to 76.8%).
 
+## Phase 4 – UI, shapes, lines, smooth motion, learned control (2026-09-26/27)
+
+How to run everything: `rl_hw/HOW_TO_RUN.md`.
+
+- **Web UI** (`PD_UI=1`, http://localhost:8000): live view with overlays; modes *red region on
+  sheet* (any shape, swappable mid-run), *click to target*, *follow red line*, *draw path*;
+  controller toggle *Classic / Learned (RL)*.
+- **Smooth motion (classic):** targets further than 2 cm get one planned rest-to-rest move
+  (trapezoid speed profile, planned acceleration + rolling friction fed forward) instead of
+  stick-slip hops; the local slope of the paper is learned per 3 cm cell and reused.
+- **Line / path following:** a reference point moves along the route (up to 4 cm/s, brakes at
+  the end); tangential + centripetal acceleration fed forward. Rig: 4 cm loop 8.7 laps/min at
+  a median 6.6 mm off the line (the earlier carrot follower: 1.1 laps/min).
+- **Robustness:** single-controller lock, camera watchdog, ball-position glitch filter,
+  30 fps camera (55 fps gave ~1 s image delay after a USB re-plug).
+- **RL (`rl_sim/plate_sim.py`, `plate_goal_env.py`, `train_plate_ppo.py`):** simulator
+  calibrated against rig logs (1-s replay error 3.4/4.3 mm at 0.5/1 s once a per-snippet local
+  slope is allowed), domain-randomised; goal-conditioned PPO with the last 4 actions in the
+  observation for the delay, and a hard policy rate limit (0.1/step) for smooth commands
+  (v1/v2 without it learned bang-bang/dither). v3 in sim: 92% reach vs 65% for PD, 1.0 s vs
+  1.3 s, 70% vs 28% inside afterwards. **Zero-shot on the rig** (3 trips, 12 mm target): 1.2-2.2 s,
+  no hops, 100% in the target afterwards. Exported to numpy (no torch on the rig).
+- **Scope:** targets at least ~5 cm from the frame (the paper grips much harder near it).
+
 ## Results summary
 
 | Task | Result |
