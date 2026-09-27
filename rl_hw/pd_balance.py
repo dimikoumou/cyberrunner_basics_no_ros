@@ -181,7 +181,33 @@ EDGE_PUSH_MIN, EDGE_PUSH_GAIN, EDGE_PUSH_MAX = 0.2, 20.0, 0.4  # action: 0.2 at 
 # dist<0.1). See max_episode_steps below.
 
 
+_INSTANCE_LOCK = None
+
+
+def _single_instance_or_exit():
+    """Only one controller may drive the rig. 2026-09-26: a second instance opened
+    the motor port while the first was running; the first crashed ('multiple access
+    on port') and its shutdown switched motor torque OFF, so the survivor kept
+    sending positions to unpowered motors -- 'running' in the UI, nothing moving."""
+    global _INSTANCE_LOCK
+    import fcntl
+    path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".controller.lock"))
+    _INSTANCE_LOCK = open(path, "a+")
+    try:
+        fcntl.flock(_INSTANCE_LOCK, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        _INSTANCE_LOCK.seek(0)
+        other = _INSTANCE_LOCK.read().strip() or "?"
+        sys.exit(f"another controller is already running (PID {other}) -- stop it first (Ctrl+C in its "
+                 f"terminal, or: pkill -INT -f pd_balance.py). Not touching the motors.")
+    _INSTANCE_LOCK.seek(0)
+    _INSTANCE_LOCK.truncate()
+    _INSTANCE_LOCK.write(str(os.getpid()))
+    _INSTANCE_LOCK.flush()
+
+
 def main():
+    _single_instance_or_exit()
     total_steps = int(sys.argv[1]) if len(sys.argv) > 1 else 6000
     max_episodes = int(sys.argv[2]) if len(sys.argv) > 2 else 15
     # optional: hold target in s (0 = never stop early), episode length in steps
