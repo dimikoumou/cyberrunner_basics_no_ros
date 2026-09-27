@@ -33,6 +33,7 @@ from goal_circle import (detect_goal_circle, detect_on_frame, save_debug, save_l
 from ui_server import UIServer, FRAME_W, FRAME_H  # noqa: E402
 from line_path import detect_line, PathTracker  # noqa: E402
 from rl_policy import RigPolicyController  # noqa: E402
+from elevator import Elevator  # noqa: E402
 from plate_env import LEVEL_OFFSET_DEG  # noqa: E402
 
 SNAPSHOT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pd_snapshots")
@@ -299,6 +300,7 @@ def main():
     if ui is not None:
         env.frame_callback = ui.publish_frame
     running = ui is None           # with the UI, wait for Start (or a click)
+    elevator = Elevator(env.port_handler, env.packet_handler) if ui is not None else None
     mode = "sheet"
     follower, line_off, line_msg = None, None, ""
     line_active, line_boost, line_ref = False, 0.0, None
@@ -470,6 +472,16 @@ def main():
                                 running = True
                         elif kind == "stop":
                             running = False
+                        elif kind == "elevator" and elevator is not None:
+                            op = c.get("op")
+                            if op == "on":
+                                elevator.set_speed(c.get("units"), c.get("dir"))
+                                elevator.start()
+                            elif op == "off":
+                                elevator.stop()
+                            elif op == "speed":
+                                elevator.set_speed(c.get("units"), c.get("dir"))
+                            ui.set_state(**elevator.state())
                         elif kind == "controller":
                             want = c.get("which") == "learned"
                             if want and rl_ctrl is None:
@@ -819,6 +831,9 @@ def main():
                     best_hold = max(best_hold, now - hold_start)
                 elif ball_found or info["status"] == "ball_lost":
                     hold_start = None
+                if elevator is not None:
+                    elevator.poll()
+                    ui.set_state(**elevator.state())
                 if ui is not None:
                     ui.set_state(controller=("learned" if policy_driving else "learned+classic settle") if use_policy else "classic",
                                  running=running, mode=mode,
@@ -895,6 +910,11 @@ def main():
               f"~{rate:.1f} steps/s overall, log: {log_path} ===")
     finally:
         log.close()
+        if elevator is not None and elevator.on:
+            try:
+                elevator.stop("stopped: controller shut down")
+            except Exception as e:
+                print(f"elevator stop failed: {e}")
         env.close()
 
 

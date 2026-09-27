@@ -94,6 +94,19 @@ PAGE = """<!doctype html>
         </div>
       </div>
       <div class="panel">
+        <h2>Ball elevator</h2>
+        <div class="row">
+          <button class="go" id="e_on">On</button>
+          <button class="stop" id="e_off">Off</button>
+          <button id="e_dir">Forward</button>
+        </div>
+        <label style="display:block;margin-top:10px;color:var(--muted);font-size:13px">
+          Speed: <span id="e_speed_lbl">12 (2.7 rpm)</span>
+          <input id="e_speed" type="range" min="0" max="1000" value="336" style="width:100%">
+        </label>
+        <div class="msg" id="e_status">off</div>
+      </div>
+      <div class="panel">
         <h2>Status</h2>
         <dl>
           <dt>Running</dt><dd id="s_run">–</dd>
@@ -126,6 +139,20 @@ $('m_line').onclick = () => cmd({cmd:'mode', mode:'line'});
 $('m_path').onclick = () => cmd({cmd:'mode', mode:'path'});
 $('p_go').onclick = () => cmd({cmd:'path_go'});
 $('p_clear').onclick = () => cmd({cmd:'path_clear'});
+let eDir = 1, eTimer = null, eMax = 1620;
+// logarithmic slider: 0..1000 -> 1..eMax units (fine control at low speed, full speed at the right end)
+const eUnits = () => Math.max(1, Math.round(Math.exp(Math.log(eMax) * parseInt($('e_speed').value, 10) / 1000)));
+const eLabel = () => { $('e_speed_lbl').textContent = `${eUnits()} (${(eUnits() * 0.229).toFixed(1)} rpm)`; };
+$('e_speed').addEventListener('input', () => {
+  eLabel(); clearTimeout(eTimer);
+  eTimer = setTimeout(() => cmd({cmd:'elevator', op:'speed', units:eUnits(), dir:eDir}), 150);
+});
+$('e_on').onclick = () => cmd({cmd:'elevator', op:'on', units:eUnits(), dir:eDir});
+$('e_off').onclick = () => cmd({cmd:'elevator', op:'off'});
+$('e_dir').onclick = () => {
+  eDir = -eDir; $('e_dir').textContent = eDir > 0 ? 'Forward' : 'Reverse';
+  cmd({cmd:'elevator', op:'speed', units:eUnits(), dir:eDir});
+};
 $('c_classic').onclick = () => cmd({cmd:'controller', which:'classic'});
 $('c_learned').onclick = () => cmd({cmd:'controller', which:'learned'});
 $('cam').addEventListener('click', ev => {
@@ -151,6 +178,12 @@ async function poll() {
     $('s_in').innerHTML = s.in_target ? '<span class="ok">yes</span>' : 'no';
     $('s_hold').textContent = s.hold != null ? s.hold.toFixed(1) + ' s' : '–';
     $('s_hz').textContent = s.hz ? s.hz.toFixed(0) + ' Hz' : '–';
+    if (s.elev_max_units && s.elev_max_units !== eMax) { eMax = s.elev_max_units; eLabel(); }
+    if (s.elev_on !== undefined) {
+      const live = s.elev_vel_rpm != null ? `, actual ${s.elev_vel_rpm.toFixed(1)} rpm, ${s.elev_current_ma} mA` : '';
+      $('e_status').innerHTML = s.elev_on ? `<span class="ok">running</span> at ${s.elev_rpm_set} rpm${live}`
+        : (s.elev_msg && s.elev_msg !== 'stopped' ? s.elev_msg : 'off') + live;
+    }
     $('s_ctrl').textContent = s.controller === 'learned' ? 'learned (approach)'
       : s.controller === 'learned+classic settle' ? 'classic (near-field settle)' : 'classic';
     $('hint').textContent = s.mode === 'click' ? 'Click the board to send the ball there'
@@ -232,7 +265,7 @@ class UIServer:
                 with ui._lock:
                     ui._cmds.append(c)
                 msg = {"start": "Starting…", "stop": "Stopping…", "mode": f"Mode: {c.get('mode')}",
-                       "click": "Target sent"}.get(c.get("cmd"), "")
+                       "click": "Target sent", "elevator": f"Elevator: {c.get('op')}"}.get(c.get("cmd"), "")
                 self._send(200, json.dumps({"msg": msg}).encode(), "application/json")
 
         self._httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
