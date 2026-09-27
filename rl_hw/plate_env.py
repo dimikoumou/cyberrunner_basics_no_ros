@@ -116,16 +116,10 @@ TILT_MAX_DEG = 5.0                    # |action|=1 -> 5deg, inside both axes' me
 TICKS_PER_DEG = {1: -140.0, 3: 100.0}  # d(ticks)/d(angle): +m1 lowers alpha, +m3 raises beta
 TILT_GAIN = 0.15                       # per-step correction. 0.5 shook the plate (2-3 step lag @22 Hz); 0.25 was fine @22 Hz but jittered 2.5deg once the 30 fps camera fix made the loop ~29 Hz (lag ~4-5 steps)
 MAX_TICKS_PER_STEP = 250
-# 2026-09-27: "level" may only move this far (ticks) from the last known-good level
-# position (last_level_position.json). A hidden plate marker gave a wrong pose, the level
-# servo chased it to the tick limits (m1 3900 / m3 3800, plate really ~5 deg) and the ball
-# rolled into a corner onto the marker, which kept the pose wrong.
-LEVEL_BAND_TICKS = {1: 350, 3: 250}          # ~2.5 deg either way
-# The motor positions say roughly what the tilt is (TICKS_PER_DEG from the known-good level
-# position). A camera tilt further off than this is a pose error (e.g. the ball right
-# beside a plate marker read beta +9.75 deg at a motor position that means ~0 deg), and
-# the servo must not chase it.
-TILT_TRUST_DEG = 3.0
+# Fixed level position (open loop, no camera): used whenever the ball is not found /
+# the elevator runs (2026-09-27, user: "just bring it level when ball not found").
+# The camera-closed-loop level once chased a wrong pose to the tick limits.
+LEVEL_TICKS = {1: int(os.environ.get("PLATE_LEVEL_M1", "2952")), 3: int(os.environ.get("PLATE_LEVEL_M3", "2812"))}
 TICK_BOUNDS = {1: (1800, 3900), 3: (700, 3800)}  # where each axis's angle plateaus (measured)
 LEVEL_TOL_DEG = 0.4
 # Delay-aligned correction (research workflow 2026-09-26, Smith-predictor idea):
@@ -276,7 +270,6 @@ class HardwarePlateEnv(gym.Env):
         self._cmd_ticks = {}           # last commanded goal position per motor (tilt_control)
         self._tilt_target = LEVEL_OFFSET_DEG  # last target (alpha, beta) in degrees
         self._meas_tilt = None          # last plausible measured (alpha, beta) in degrees
-        self._pose_ok = False           # all 4 plate markers found in the last frame
         self._target_hist = []          # recent (alpha, beta) targets, newest last
         self._last_commanded_action = np.zeros(2, dtype=np.float32)
         self._pos_history = []
@@ -625,12 +618,6 @@ class HardwarePlateEnv(gym.Env):
             return np.nan, np.nan, 0.0, 0.0, False
         alpha, beta = inputs
         ball_found = not (np.isnan(xb) or np.isnan(yb))
-        # A plate marker not found this frame (hidden by the ball, a hand, glare): the
-        # detector then uses the middle of its search window, so the pose -- tilt AND ball
-        # position -- is wrong by degrees / centimetres. Trust neither.
-        self._pose_ok = not bool(getattr(self.pipeline.measurements.detector, "corners_missing", False))
-        if not self._pose_ok:
-            return np.nan, np.nan, alpha, beta, False
         # Defense in depth: a mis-detected blob (e.g. a large false-positive region
         # under bad lighting getting through the ball detector) can still produce a
         # numeric, non-NaN position -- just a physically impossible one. Observed
@@ -704,19 +691,9 @@ class HardwarePlateEnv(gym.Env):
             tpd = TICKS_PER_DEG[dxl_id]
             d = min(TILT_MEAS_DELAY_STEPS[dxl_id], len(self._target_hist) - 1)
             target_then = self._target_hist[-1 - d][i]
-            delta = (target[i] - self._tilt_target[i]) * tpd
-            lvl_i = self._level_ticks().get(dxl_id)
-            cur = self._cmd_ticks.get(dxl_id)
-            plausible = (lvl_i is None or cur is None
-                         or abs(meas[i] - (LEVEL_OFFSET_DEG[i] + (cur - lvl_i) / tpd)) < TILT_TRUST_DEG)
-            if self._pose_ok and plausible:   # correct only against a trustworthy measurement
-                delta += TILT_GAIN * (target_then - meas[i]) * tpd
+            delta = (target[i] - self._tilt_target[i]) * tpd + TILT_GAIN * (target_then - meas[i]) * tpd
             delta = float(np.clip(delta, -MAX_TICKS_PER_STEP, MAX_TICKS_PER_STEP))
             lo, hi = TICK_BOUNDS[dxl_id]
-            lvl = self._level_ticks().get(dxl_id)
-            if lvl is not None and not np.any(action):
-                # levelling: never further than LEVEL_BAND_TICKS from the known-good level
-                lo, hi = max(lo, lvl - LEVEL_BAND_TICKS[dxl_id]), min(hi, lvl + LEVEL_BAND_TICKS[dxl_id])
             pos = int(np.clip(self._cmd_ticks.get(dxl_id, (lo + hi) // 2) + delta, lo, hi))
             self._cmd_ticks[dxl_id] = pos
             set_position(self.port_handler, self.packet_handler, dxl_id, pos)
@@ -731,32 +708,10 @@ class HardwarePlateEnv(gym.Env):
             time.sleep(self.dt)
             self._read_state()
 
-    def _level_ticks(self):
-        """last known-good level motor positions {1: m1, 3: m3} (saved by a settled
-        _servo_level), or {} if none"""
-        if getattr(self, "_level_cache", None) is None:
-            try:
-                with open(LAST_LEVEL_CACHE_PATH) as f:
-                    c = json.load(f)
-                self._level_cache = {1: int(c["m1"]), 3: int(c["m3"])}
-            except (OSError, KeyError, ValueError):
-                self._level_cache = {}
-        return self._level_cache
-
-    def _goto_level_ticks(self):
-        """open loop: straight to the known-good level position (no camera needed)"""
-        for dxl_id, pos in self._level_ticks().items():
-            self._cmd_ticks[dxl_id] = pos
-            set_position(self.port_handler, self.packet_handler, dxl_id, pos)
-        self._tilt_target = LEVEL_OFFSET_DEG
-        self._target_hist = [LEVEL_OFFSET_DEG] * 12
-
     def _servo_level(self, max_s=12.0):
         """Closed-loop leveling: servo to (0, 0) until both measured angles stay
-        within LEVEL_TOL_DEG for several consecutive frames. Starts from the known-good
-        level position; without a trustworthy pose (a marker hidden) it stays there."""
+        within LEVEL_TOL_DEG for several consecutive frames."""
         zero = np.zeros(2, dtype=np.float32)
-        self._goto_level_ticks()
         self._read_state()
         t0, ok = time.time(), 0
         while time.time() - t0 < max_s:
@@ -774,14 +729,24 @@ class HardwarePlateEnv(gym.Env):
             try:
                 with open(LAST_LEVEL_CACHE_PATH, "w") as f:
                     json.dump({"m1": m1, "m3": m3}, f)
-                self._level_cache = {1: int(m1), 3: int(m3)}
             except OSError:
                 pass
         else:
             print(f"[HardwarePlateEnv] servo leveling did not settle in {max_s:.0f}s "
                   f"(alpha={a:+.2f} beta={b:+.2f}, m1={m1} m3={m3}) -- proceeding anyway")
 
+    def _level_open_loop(self):
+        """plate straight to the fixed level position (LEVEL_TICKS), no camera involved"""
+        for dxl_id, pos in LEVEL_TICKS.items():
+            self._cmd_ticks[dxl_id] = pos
+            set_position(self.port_handler, self.packet_handler, dxl_id, pos)
+        self._tilt_target = LEVEL_OFFSET_DEG
+        self._target_hist = [LEVEL_OFFSET_DEG] * 12
+
     def _write_action(self, action):
+        if getattr(self, "hold_level", False):
+            self._level_open_loop()      # ball missing / elevator running: fixed level, nothing else
+            return
         if self.tilt_control:
             self._servo_tilt(action)
             return
@@ -812,6 +777,9 @@ class HardwarePlateEnv(gym.Env):
             set_position(self.port_handler, self.packet_handler, motor_id, pos)
 
     def _recenter_motors(self):
+        if getattr(self, "open_loop_level", False):
+            self._level_open_loop()
+            return
         if self.tilt_control:
             self._write_action(np.zeros(2, dtype=np.float32))
             return
@@ -821,6 +789,10 @@ class HardwarePlateEnv(gym.Env):
             set_position(self.port_handler, self.packet_handler, motor_id, center_pos)
 
     def _level_plate(self, tolerance_deg=0.5, max_iters=20, max_step=150, settle_s=0.8, quick=False):
+        if getattr(self, "open_loop_level", False):
+            self._level_open_loop()
+            time.sleep(0.5)
+            return
         """Closed-loop leveling against live camera feedback, run at the start of
         every episode. A single calibrated 'center' tick value turned out NOT to be
         trustworthy on its own: identical commanded ticks for motor3's axis were
@@ -1210,7 +1182,7 @@ class HardwarePlateEnv(gym.Env):
             if not getattr(self, "recover_tilts", True):
                 # 2026-09-27 (user): while the ball is missing the plate stays LEVEL -- no
                 # recovery tilts (a lost ball is under the plate / out, not in a corner)
-                self._write_action(np.zeros(2, dtype=np.float32))
+                self._level_open_loop()
                 xb, yb, alpha, beta, ball_found = self._read_state()
                 continue
             if waited - last_log >= LOG_EVERY_S:

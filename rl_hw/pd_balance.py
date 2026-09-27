@@ -221,8 +221,7 @@ GOAL = (-0.0078, 0.0060)
 # reloaded by the elevator (motor 2) and the task continues
 VIA_R = 0.012                          # target radius of a via point round a hole
 VIA_REACH = 0.02                       # this close to a via point -> head for the next one
-RELOAD_TIMEOUT_S = 90.0                # ball lost near a hole: run the elevator this long at most
-RELOAD_TIMEOUT_OTHER_S = 15.0          # lost elsewhere (e.g. hidden in a corner): shorter, then the gentle recovery
+RELOAD_TIMEOUT_S = 300.0               # ball lost: elevator runs until the ball is seen again (safety cap)
 RELOAD_UNITS = int(os.environ.get("PD_RELOAD_UNITS", "328"))      # elevator speed for a reload (~75 rpm)
 RELOAD_SEEN_FRAMES = 5                 # ball visible on the paper this many frames in a row = reloaded
 GOAL_TOLERANCE = 0.0455
@@ -492,10 +491,9 @@ def main():
             elevator.start()
         started = True
         print(f"ball lost -- running the elevator at {elevator.units} units until it is back")
-        env._servo_level(max_s=3.0)          # level the plate first (closed loop on the camera)
-        level = np.zeros(2, dtype=np.float32)
+        env._level_open_loop()                 # fixed level position, no camera
         while time.time() - t0 < timeout:
-            env._write_action(level)               # one closed-loop levelling step per frame: stays level
+            env._level_open_loop()                 # stays at the fixed level the whole time
             xr, yr, _, _, found = env._read_state()
             # back = seen anywhere on the plate (corners too), just not inside the hole
             ok = found and near_hole(holes, (xr, yr), extra=-HOLE_MARGIN_M) is None
@@ -535,6 +533,7 @@ def main():
     lost_since, lost_alerted = None, False
     if ui is not None:
         env.recover_tilts = False            # ball missing -> plate stays level (no recovery tilts)
+        env.open_loop_level = True           # "level" = the fixed level position, never camera-chased
 
     def on_wait_tick():
         track_lost(False)
@@ -600,7 +599,7 @@ def main():
             print(f"\n=== episode {episode} ===")
             if lost_xy is not None and auto_reload and elevator is not None:
                 in_hole = bool(holes) and near_hole(holes, lost_xy, extra=0.015) is not None
-                ok_, secs = reload_ball(RELOAD_TIMEOUT_S if in_hole else RELOAD_TIMEOUT_OTHER_S)
+                ok_, secs = reload_ball(RELOAD_TIMEOUT_S)
                 if ok_ and in_hole:
                     drop_times.append(secs)
                     if mode == "drop":
@@ -1030,13 +1029,11 @@ def main():
                 if not running:
                     action = np.zeros(2, dtype=np.float32)   # stopped: hold the plate level
                     phase, kick, move = "idle", np.zeros(2), None
-                if elevator is not None and elevator.on:
-                    action = np.zeros(2, dtype=np.float32)   # elevator running -> plate level (user rule)
-                    phase, kick, move = "idle", np.zeros(2), None
-                if not last_found:
-                    # ball not seen (fell into a hole, hidden, or a dropped frame): level the
-                    # plate at once instead of holding the last tilt (closed-loop step to level)
+                # ball not seen, or elevator running -> the fixed level position (open loop)
+                env.hold_level = ui is not None and (not last_found or (elevator is not None and elevator.on))
+                if env.hold_level:
                     action = np.zeros(2, dtype=np.float32)
+                    phase, kick, move = "idle", np.zeros(2), None
                 obs, reward, terminated, truncated, info = env.step(action)
                 if rl_ctrl is not None:
                     rl_ctrl.record_applied(env._last_commanded_action)
