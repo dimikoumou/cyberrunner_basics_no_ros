@@ -186,10 +186,13 @@ class PathTracker:
     acceleration fed forward (tangential + centripetal on curves) plus rolling
     friction. If the ball falls behind by more than LAG_MAX the reference waits."""
 
-    def __init__(self, path, closed, ball_xy, v=V_LINE, a=A_LINE):
+    def __init__(self, path, closed, ball_xy, v=V_LINE, a=A_LINE, keep_direction=False):
+        """keep_direction: follow the path in the given order (drawn paths start at the
+        first clicked point); otherwise an open line starts at the end nearer the ball."""
         path = np.asarray(path, dtype=float)
         ball_xy = np.asarray(ball_xy, dtype=float)
-        if not closed and np.hypot(*(path[-1] - ball_xy)) < np.hypot(*(path[0] - ball_xy)):
+        if (not closed and not keep_direction
+                and np.hypot(*(path[-1] - ball_xy)) < np.hypot(*(path[0] - ball_xy))):
             path = path[::-1]
         self.closed, self.v_max, self.a_max = closed, v, a
         pts = np.vstack([path, path[:1]]) if closed else path

@@ -575,7 +575,8 @@ def main():
                                 for p0, p1 in zip(path_pts[:-1], path_pts[1:]):
                                     n = max(2, int(np.hypot(*(np.asarray(p1) - p0)) / 0.005))
                                     dense += [p0 + (np.asarray(p1) - p0) * k / n for k in range(1, n + 1)]
-                                follower = PathTracker(np.array(dense), False, np.array([xb, yb]))
+                                # drawn paths run in drawing order: start at the first clicked point
+                                follower = PathTracker(np.array(dense), False, np.array([xb, yb]), keep_direction=True)
                                 line_active, line_boost = False, 0.0
                                 goal_polygon = goal_contour_px = goal_px = goal_r_px = None
                                 line_msg = f"Driving the path ({follower.L * 100:.0f} cm)"
