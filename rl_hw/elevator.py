@@ -10,6 +10,8 @@ goal velocity to 0 and switch torque off. Safety notes from the first test run:
     turning means a stall -> switch off.
 Only RAM registers are written (torque, goal velocity, profile acceleration).
 """
+import json
+import os
 import time
 
 ELEV_ID = 2
@@ -19,6 +21,7 @@ RPM_PER_UNIT = 0.229
 ADDR_VEL_LIMIT = 44
 MAX_UNITS_FALLBACK = 1620        # the motor's own Velocity Limit (read at startup) = UI maximum
 STALL_MA, STALL_S = 250, 1.0
+SETTINGS_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "elevator_settings.json"))
 
 
 def _s32(v):
@@ -37,6 +40,13 @@ class Elevator:
         self._last_read, self._stall_since, self.msg = 0.0, None, ""
         lim, res, _ = ph.read4ByteTxRx(port, ELEV_ID, ADDR_VEL_LIMIT)
         self.max_units = int(lim) if res == 0 and 0 < lim <= 2047 else MAX_UNITS_FALLBACK
+        try:   # the last speed/direction set in the UI survives a controller restart
+            with open(SETTINGS_PATH) as f:
+                st = json.load(f)
+            self.units = int(max(0, min(self.max_units, st.get("units", self.units))))
+            self.direction = 1 if st.get("dir", 1) >= 0 else -1
+        except (OSError, ValueError):
+            pass
 
     def _w1(self, addr, v):
         return self.ph.write1ByteTxRx(self.port, ELEV_ID, addr, v)
@@ -51,6 +61,11 @@ class Elevator:
             self.direction = 1 if direction >= 0 else -1
         if self.on:
             self._w4(ADDR_GOAL_VEL, self.direction * self.units)
+        try:
+            with open(SETTINGS_PATH, "w") as f:
+                json.dump({"units": self.units, "dir": self.direction}, f)
+        except OSError:
+            pass
 
     def start(self):
         self._w4(ADDR_GOAL_VEL, 0)               # never enable torque with a stale goal

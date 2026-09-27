@@ -61,7 +61,7 @@ PAGE = """<!doctype html>
   <p class="sub">Ball-on-plate control. Pick a mode, press Start, and click the board in click mode.</p>
   <div class="grid">
     <div class="view">
-      <img id="cam" src="/stream" alt="Live view of the plate">
+      <img id="cam" alt="Live view of the plate">
       <div class="hint" id="hint">Loading…</div>
     </div>
     <div>
@@ -98,11 +98,24 @@ PAGE = """<!doctype html>
         </label>
       </div>
       <div class="panel">
+        <h2>Hole &amp; reload</h2>
+        <div class="row">
+          <button id="h_drop">Drop into hole</button>
+          <button id="h_drop5">Drop test &times;5</button>
+          <button id="h_detect">Find holes</button>
+        </div>
+        <label style="display:block;margin-top:8px;font-size:13px;color:var(--muted)">
+          <input type="checkbox" id="h_reload" checked> auto-reload with the elevator when the ball falls in
+        </label>
+        <div class="msg" id="h_status">–</div>
+      </div>
+      <div class="panel">
         <h2>Ball elevator</h2>
         <div class="row">
           <button class="go" id="e_on">On</button>
           <button class="stop" id="e_off">Off</button>
           <button id="e_dir">Forward</button>
+          <button id="e_max">Max</button>
         </div>
         <label style="display:block;margin-top:10px;color:var(--muted);font-size:13px">
           Speed: <span id="e_speed_lbl">12 (2.7 rpm)</span>
@@ -152,11 +165,19 @@ $('e_speed').addEventListener('input', () => {
   eTimer = setTimeout(() => cmd({cmd:'elevator', op:'speed', units:eUnits(), dir:eDir}), 150);
 });
 $('e_on').onclick = () => cmd({cmd:'elevator', op:'on', units:eUnits(), dir:eDir});
+$('e_max').onclick = () => {
+  $('e_speed').value = 1000; eLabel();
+  cmd({cmd:'elevator', op:'speed', units:eMax, dir:eDir});
+};
 $('e_off').onclick = () => cmd({cmd:'elevator', op:'off'});
 $('e_dir').onclick = () => {
   eDir = -eDir; $('e_dir').textContent = eDir > 0 ? 'Forward' : 'Reverse';
   cmd({cmd:'elevator', op:'speed', units:eUnits(), dir:eDir});
 };
+$('h_drop').onclick = () => cmd({cmd:'drop_test', n:1});
+$('h_drop5').onclick = () => cmd({cmd:'drop_test', n:5});
+$('h_detect').onclick = () => cmd({cmd:'holes_detect'});
+$('h_reload').onchange = () => cmd({cmd:'auto_reload', on:$('h_reload').checked});
 $('c_classic').onclick = () => cmd({cmd:'controller', which:'classic'});
 $('c_learned').onclick = () => cmd({cmd:'controller', which:'learned'});
 $('c_odil').onclick = () => cmd({cmd:'controller', which:'odil'});
@@ -166,11 +187,22 @@ $('cam').addEventListener('click', ev => {
   cmd({cmd:'click', u:(ev.clientX - r.left) / r.width, v:(ev.clientY - r.top) / r.height});
 });
 const mm = v => (v * 1000).toFixed(1) + ' mm';
+function nextFrame() {
+  const img = new Image();
+  let done = false;
+  const next = ok => { if (done) return; done = true; setTimeout(nextFrame, ok ? 80 : 500); };
+  img.onload = () => { $('cam').src = img.src; next(true); };
+  img.onerror = () => next(false);
+  setTimeout(() => next(false), 3000);   // never let one hung request stop the view
+  img.src = '/frame.jpg?t=' + Date.now();
+}
+nextFrame();
+let eSynced = false;
 async function poll() {
   try {
     const s = await (await fetch('/state')).json();
     $('s_run').innerHTML = s.running ? '<span class="ok">balancing</span>' : '<span class="bad">stopped</span>';
-    $('s_mode').textContent = {click:'click to target', sheet:'red region on sheet', line:'follow red line', path:'drawn path'}[s.mode] || s.mode;
+    $('s_mode').textContent = {click:'click to target', sheet:'red region on sheet', line:'follow red line', path:'drawn path', drop:'drop into hole'}[s.mode] || s.mode;
     $('m_sheet').classList.toggle('on', s.mode === 'sheet');
     $('m_click').classList.toggle('on', s.mode === 'click');
     $('m_line').classList.toggle('on', s.mode === 'line');
@@ -187,16 +219,24 @@ async function poll() {
     $('s_hold').textContent = s.hold != null ? s.hold.toFixed(1) + ' s' : '–';
     $('s_hz').textContent = s.hz ? s.hz.toFixed(0) + ' Hz' : '–';
     if (s.elev_max_units && s.elev_max_units !== eMax) { eMax = s.elev_max_units; eLabel(); }
+    if (!eSynced && s.elev_units) {
+      eSynced = true;
+      $('e_speed').value = Math.round(1000 * Math.log(Math.max(1, s.elev_units)) / Math.log(eMax));
+      eDir = s.elev_dir || 1; $('e_dir').textContent = eDir > 0 ? 'Forward' : 'Reverse'; eLabel();
+    }
     if (s.elev_on !== undefined) {
       const live = s.elev_vel_rpm != null ? `, actual ${s.elev_vel_rpm.toFixed(1)} rpm, ${s.elev_current_ma} mA` : '';
       $('e_status').innerHTML = s.elev_on ? `<span class="ok">running</span> at ${s.elev_rpm_set} rpm${live}`
         : (s.elev_msg && s.elev_msg !== 'stopped' ? s.elev_msg : 'off') + live;
     }
+    if (s.auto_reload !== undefined) $('h_reload').checked = s.auto_reload;
+    if (s.hole_msg !== undefined) $('h_status').textContent = s.hole_msg;
     $('s_ctrl').textContent = (s.controller || 'classic').endsWith('+classic settle') ? 'classic (near-field settle)'
       : s.controller === 'learned' ? 'learned RL' : s.controller === 'odil' ? 'ODIL' : 'classic';
     $('hint').textContent = s.mode === 'click' ? 'Click the board to send the ball there'
       : s.mode === 'path' ? (s.line_msg || 'Click points to draw a path, then press Go')
       : s.mode === 'line' ? (s.line_msg || 'Following the red line')
+      : s.mode === 'drop' ? (s.hole_msg || 'Rolling the ball into the hole')
       : (s.goal ? 'Following the red region' : 'No red region found');
   } catch (e) { $('hint').textContent = 'Controller not reachable'; }
   setTimeout(poll, 250);
@@ -216,7 +256,7 @@ class UIServer:
         self.state = {"running": False, "mode": "sheet", "ball": None, "goal": None, "goal_r": None,
                       "dist": None, "in_target": False, "hold": None, "hz": None, "controller": "classic"}
         self.overlay = {"contour_px": None, "goal_px": None, "goal_r_px": None, "ball_px": None,
-                        "path_px": None, "path_closed": False}
+                        "path_px": None, "path_closed": False, "holes_px": None}
         self._cmds = []
         ui = self
 
@@ -239,6 +279,20 @@ class UIServer:
                     with ui._lock:
                         body = json.dumps(ui.state).encode()
                     self._send(200, body, "application/json")
+                elif self.path.startswith("/frame.jpg"):
+                    # single latest frame: the page polls this (MJPEG <img> streams stall in
+                    # Safari after a controller restart and never recover)
+                    with ui._lock:
+                        jpg = ui._jpeg
+                    if jpg is None:
+                        self._send(503, b"no frame yet", "text/plain")
+                    else:
+                        self.send_response(200)
+                        self.send_header("Content-Type", "image/jpeg")
+                        self.send_header("Content-Length", str(len(jpg)))
+                        self.send_header("Cache-Control", "no-store")
+                        self.end_headers()
+                        self.wfile.write(jpg)
                 elif self.path.startswith("/stream"):
                     self.send_response(200)
                     self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
@@ -309,6 +363,10 @@ class UIServer:
         if ov.get("path_px") is not None and len(ov["path_px"]) >= 2:
             cv2.polylines(img, [np.asarray(ov["path_px"]).astype(np.int32)], bool(ov.get("path_closed")),
                           (255, 0, 255), 1, cv2.LINE_AA)
+        for hx, hy, hr, kr in (ov.get("holes_px") or []):
+            c = (int(round(hx)), int(round(hy)))
+            cv2.circle(img, c, max(2, int(round(hr))), (0, 0, 255), 1, cv2.LINE_AA)       # the hole
+            cv2.circle(img, c, max(3, int(round(kr))), (0, 140, 255), 1, cv2.LINE_AA)     # keep-out zone
         if ov.get("goal_px") is not None:
             gx, gy = (int(round(v)) for v in ov["goal_px"])
             if ov.get("goal_r_px"):
@@ -319,7 +377,7 @@ class UIServer:
             cv2.circle(img, (int(round(bx)), int(round(by))), 9, (0, 220, 255), 1, cv2.LINE_AA)
         label = ("BALANCING" if st.get("running") else "STOPPED") + "  |  " + {
             "click": "click to target", "sheet": "red region", "line": "follow red line",
-            "path": "drawn path"}.get(st.get("mode"), "")
+            "path": "drawn path", "drop": "drop into hole"}.get(st.get("mode"), "")
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
         cv2.rectangle(img, (4, 4), (12 + tw, 12 + th), (0, 0, 0), -1)
         cv2.putText(img, label, (8, 8 + th), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)

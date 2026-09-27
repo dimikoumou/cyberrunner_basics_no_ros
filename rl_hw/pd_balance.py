@@ -34,6 +34,7 @@ from ui_server import UIServer, FRAME_W, FRAME_H  # noqa: E402
 from line_path import detect_line, PathTracker  # noqa: E402
 from rl_policy import RigPolicyController, ODILRigController  # noqa: E402
 from elevator import Elevator  # noqa: E402
+from hole import detect_holes_stable, save_holes, near_hole, detour, HOLE_MARGIN_M  # noqa: E402
 from plate_env import LEVEL_OFFSET_DEG  # noqa: E402
 
 SNAPSHOT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pd_snapshots")
@@ -215,6 +216,16 @@ GOAL_AGREE_M = 0.004
 GOAL_MOVE_M = 0.008
 GOAL_RADIUS_CHANGE_M = 0.005
 GOAL = (-0.0078, 0.0060)
+# holes in the paper (hole.py): targets route round them; a ball that falls in is
+# reloaded by the elevator (motor 2) and the task continues
+VIA_R = 0.012                          # target radius of a via point round a hole
+VIA_REACH = 0.02                       # this close to a via point -> head for the next one
+RELOAD_TIMEOUT_S = 90.0                # ball lost near a hole: run the elevator this long at most
+RELOAD_TIMEOUT_OTHER_S = 15.0          # lost elsewhere (e.g. hidden in a corner): shorter, then the gentle recovery
+RELOAD_UNITS = int(os.environ.get("PD_RELOAD_UNITS", "328"))      # elevator speed for a reload (~75 rpm)
+UNJAM_AFTER_S = 10.0                   # ball not back this long -> it is caught inside: unjam, then every 10 s
+UNJAM_TILT = 0.8                       # slow full tilt (action units, 4 deg) toward each side in turn
+RELOAD_SEEN_FRAMES = 5                 # ball visible on the paper this many frames in a row = reloaded
 GOAL_TOLERANCE = 0.0455
 # Direct feedback while watching this live: correcting X and Y together lets the
 # combined vector point diagonally, straight at a corner, instead of going through
@@ -375,6 +386,27 @@ def main():
         goal_provisional = res["source"] == "occluded"
     env.fixed_goal = goal
     env.goal_tolerance = goal_tol
+    holes = [] if os.environ.get("PD_HOLES") == "0" else detect_holes_stable(env)
+    save_holes(holes)
+    auto_reload = elevator is not None
+    drop_left, drop_times, drop_prev, restore_after_reset = 0, [], None, False
+    vias, final_target = [], (goal, goal_tol, goal_polygon, goal_contour_px, goal_px, goal_r_px, "start")
+    for h in holes:
+        print(f"hole at ({h['center'][0]:+.4f}, {h['center'][1]:+.4f}) m, radius {h['radius'] * 1000:.1f} mm "
+              f"-> keep-out {(h['radius'] + HOLE_MARGIN_M) * 1000:.0f} mm")
+
+    def hole_status(extra=""):
+        base = (f"{len(holes)} hole(s) found" if holes else "no hole found") + (
+            f" | drops {len(drop_times)}, last reload {drop_times[-1]:.1f} s" if drop_times else "")
+        return base + (f" | {extra}" if extra else "")
+
+    def publish_holes(extra=""):
+        if ui is None:
+            return
+        ui.set_overlay(holes_px=[(h["px"][0], h["px"][1], h["px"][2],
+                                  h["px"][2] * (h["radius"] + HOLE_MARGIN_M) / max(h["radius"], 1e-4)) for h in holes])
+        ui.set_state(hole_msg=hole_status(extra), auto_reload=auto_reload)
+    publish_holes()
     # Edge guard only where the ball is past the wall threshold AND further out than
     # the goal disc on that side -- a disc drawn near an edge stays reachable.
     def edge_limits(g, r, quiet=False):
@@ -419,6 +451,85 @@ def main():
         n_goal_changes += 1
         print(f"\n>>> NEW GOAL ({why}): centre ({goal[0]:+.4f}, {goal[1]:+.4f}) m, radius {goal_tol * 1000:.1f} mm <<<\n")
 
+    def set_target(center, radius, polygon=None, contour_px=None, px=None, r_px=None, why="", from_xy=None):
+        """adopt_goal, but routed round the holes: via points first, then the target"""
+        nonlocal vias, final_target
+        final_target = (center, radius, polygon, contour_px, px, r_px, why)
+        vias = detour(holes, from_xy, center) if (holes and from_xy is not None) else []
+        if vias:
+            print(f"  routing round the hole: {len(vias)} via point(s)")
+            adopt_goal(vias[0], VIA_R, polygon, contour_px, px, r_px, why + ", via point")
+        else:
+            adopt_goal(center, radius, polygon, contour_px, px, r_px, why)
+
+    def reload_ball(timeout):
+        """The ball is lost (fell into a hole): run the elevator at RELOAD_UNITS, forward,
+        only until the ball is back on the paper, then stop it. -> (reloaded, seconds)."""
+        t0, seen, units0, dir0 = time.time(), 0, elevator.units, elevator.direction
+        elevator.units, elevator.direction = RELOAD_UNITS, 1     # not saved: the UI setting stays
+        if elevator.on:
+            elevator._w4(104, elevator.units)           # goal velocity (direct: set_speed would save it)
+        else:
+            elevator.start()
+        started = True
+        print(f"ball lost -- running the elevator at {elevator.units} units until it is back")
+        env._write_action(np.zeros(2, dtype=np.float32))
+        next_unjam, n_unjam = UNJAM_AFTER_S, 0
+        tilt_dirs = [np.array(d, dtype=np.float32) for d in ((1, 0), (0, 1), (-1, 0), (0, -1))]
+        while time.time() - t0 < timeout:
+            if timeout >= RELOAD_TIMEOUT_S and time.time() - t0 > next_unjam and elevator.on:
+                # caught inside the frame / return channel: back the elevator off for 1 s,
+                # then forward again, while the board tilts slowly to one side (ramped, no jolt)
+                d = tilt_dirs[n_unjam % 4]
+                n_unjam += 1
+                print(f"  ball not back after {time.time() - t0:.0f} s -- unjam {n_unjam}: elevator reverse 1 s, "
+                      f"slow tilt {tuple(d)}")
+                elevator._w4(104, -elevator.units)
+                for k in range(1, 21):
+                    env._write_action(d * UNJAM_TILT * k / 20)
+                    time.sleep(0.05)
+                elevator._w4(104, elevator.units)
+                t_hold = time.time()
+                while time.time() - t_hold < 2.0:
+                    env._read_state()
+                    time.sleep(0.03)
+                for k in range(19, -1, -1):
+                    env._write_action(d * UNJAM_TILT * k / 20)
+                    time.sleep(0.05)
+                next_unjam = time.time() - t0 + UNJAM_AFTER_S
+            xr, yr, _, _, found = env._read_state()
+            ok = (found and abs(xr) < env._x_half - 0.003 and abs(yr) < env._y_half - 0.003
+                  and near_hole(holes, (xr, yr), extra=-HOLE_MARGIN_M) is None)
+            seen = seen + 1 if ok else 0
+            elevator.poll()
+            if ui is not None:
+                ui.set_state(**elevator.state(), ball=[float(xr), float(yr)] if found else None,
+                             hole_msg=hole_status(f"reloading… {time.time() - t0:.0f} s"))
+                ui.set_overlay(ball_px=getattr(env.pipeline.measurements.detector, "ball_pos", None) if found else None)
+                with ui._lock:
+                    stop_req = any(c.get("cmd") == "stop" or (c.get("cmd") == "elevator" and c.get("op") == "off")
+                                   for c in ui._cmds)
+                if stop_req:
+                    print("reload aborted by the user")
+                    break
+            if seen >= RELOAD_SEEN_FRAMES or (started and not elevator.on):
+                break
+            time.sleep(0.03)
+        if started and elevator.on:
+            elevator.stop("stopped: ball reloaded" if seen >= RELOAD_SEEN_FRAMES else "stopped: reload gave up")
+        elevator.units, elevator.direction = units0, dir0
+        dt_ = time.time() - t0
+        print(f"reload {'done' if seen >= RELOAD_SEEN_FRAMES else 'FAILED'} after {dt_:.1f} s")
+        return seen >= RELOAD_SEEN_FRAMES, dt_
+
+    def aim_at_hole():
+        nonlocal vias
+        h = min(holes, key=lambda h_: np.hypot(h_["center"][0] - xb, h_["center"][1] - yb))
+        vias = []
+        adopt_goal(h["center"], h["radius"], None, None, h["px"][:2], h["px"][2], "drop test: into the hole")
+
+    xb = yb = 0.0
+    lost_xy = None
     goal_cands = []
     last_goal_check = 0.0
     n_goal_changes = 0
@@ -461,7 +572,35 @@ def main():
         while total_taken < total_steps and episode < max_episodes:
             episode += 1
             print(f"\n=== episode {episode} ===")
+            if lost_xy is not None and auto_reload and elevator is not None:
+                in_hole = bool(holes) and near_hole(holes, lost_xy, extra=0.015) is not None
+                ok_, secs = reload_ball(RELOAD_TIMEOUT_S if in_hole else RELOAD_TIMEOUT_OTHER_S)
+                if ok_ and in_hole:
+                    drop_times.append(secs)
+                    if mode == "drop":
+                        drop_left -= 1
+                        restore_after_reset = drop_left <= 0
+                publish_holes("ball reloaded" if ok_ else ("reload failed -- ball not back" if in_hole else ""))
+            lost_xy = None
             obs, info = env.reset()
+            xb, yb = float(obs[0]), float(obs[1])
+            if episode == 1 and holes and mode != "click":
+                set_target(*final_target[:6], why="start", from_xy=(xb, yb))   # first move routes round the hole
+            if mode == "drop" and drop_left > 0 and holes:
+                aim_at_hole()
+                publish_holes(f"drop test: {drop_left} to go")
+            elif restore_after_reset:
+                restore_after_reset = False
+                pm, pt = drop_prev or ("click", None)
+                mode, live_goal = (pm, pm == "sheet") if pm in ("sheet", "click") else ("click", False)
+                if pt is not None and pm in ("sheet", "click"):
+                    set_target(*pt[:6], why=pt[6] + " (after drop test)", from_xy=(xb, yb))
+                else:
+                    running = False
+                if ui is not None:
+                    ui.set_state(mode=mode)
+                publish_holes(f"drop test done: {len(drop_times)} reloads, "
+                              f"mean {np.mean(drop_times):.1f} s" if drop_times else "drop test done")
             pos_buf.clear()
             kick[:] = 0
             kicking, anchor, cap_t, last_found = False, None, None, True
@@ -512,6 +651,7 @@ def main():
                         elif kind == "mode" and c.get("mode") in ("sheet", "click", "line", "path"):
                             mode = c["mode"]
                             live_goal = mode == "sheet"
+                            vias, drop_left = [], 0
                             follower, line_active = None, False
                             ui.set_overlay(path_px=None)
                             ui.set_state(mode=mode)
@@ -533,8 +673,8 @@ def main():
                                 cand = detect_on_frame(env, env._last_frame)
                                 if cand is not None:
                                     ex = cand[2]
-                                    adopt_goal(cand[0], cand[1], ex["polygon"], ex["contour_px"], ex["px"][:2],
-                                               ex["px"][2], "sheet")
+                                    set_target(cand[0], cand[1], ex["polygon"], ex["contour_px"], ex["px"][:2],
+                                               ex["px"][2], "sheet", from_xy=(xb, yb))
                         elif kind == "test_line":
                             # synthetic route for testing the following without a sheet
                             rr = float(c.get("r", 0.04))
@@ -556,7 +696,10 @@ def main():
                         elif kind == "click" and mode == "path":
                             row, col = float(c.get("v", -1)) * FRAME_H, float(c.get("u", -1)) * FRAME_W
                             xy = pixel_to_plate(env, row, col)
-                            if xy is not None and abs(xy[0]) < env._x_half - 0.015 and abs(xy[1]) < env._y_half - 0.015:
+                            if xy is not None and near_hole(holes, xy) is not None:
+                                line_msg = "Too close to the hole -- click a bit further away"
+                                ui.set_state(line_msg=line_msg)
+                            elif xy is not None and abs(xy[0]) < env._x_half - 0.015 and abs(xy[1]) < env._y_half - 0.015:
                                 path_pts.append(xy)
                                 path_px.append((col, row))
                                 line_msg = f"{len(path_pts)} point(s) -- click more, then Go"
@@ -571,8 +714,11 @@ def main():
                             if len(path_pts) < 2:
                                 line_msg = "Click at least 2 points first"
                             else:
-                                dense = [path_pts[0]]
+                                routed = [np.asarray(path_pts[0], float)]
                                 for p0, p1 in zip(path_pts[:-1], path_pts[1:]):
+                                    routed += list(detour(holes, p0, p1)) + [np.asarray(p1, float)]
+                                dense = [routed[0]]
+                                for p0, p1 in zip(routed[:-1], routed[1:]):
                                     n = max(2, int(np.hypot(*(np.asarray(p1) - p0)) / 0.005))
                                     dense += [p0 + (np.asarray(p1) - p0) * k / n for k in range(1, n + 1)]
                                 # drawn paths run in drawing order: start at the first clicked point
@@ -582,6 +728,28 @@ def main():
                                 line_msg = f"Driving the path ({follower.L * 100:.0f} cm)"
                                 running = True
                             ui.set_state(line_msg=line_msg)
+                        elif kind == "drop_test":
+                            if not holes:
+                                publish_holes("no hole found -- press Find holes")
+                            elif elevator is None:
+                                publish_holes("no elevator connection -- drop test needs the UI controller")
+                            else:
+                                if mode != "drop":
+                                    drop_prev = (mode, final_target)
+                                mode, live_goal, follower, line_active = "drop", False, None, False
+                                drop_left, auto_reload = max(1, int(c.get("n", 1))), True
+                                ui.set_overlay(path_px=None)
+                                aim_at_hole()
+                                running = True
+                                ui.set_state(mode=mode)
+                                publish_holes(f"drop test: {drop_left} to go")
+                        elif kind == "holes_detect":
+                            holes = detect_holes_stable(env)
+                            save_holes(holes)
+                            publish_holes()
+                        elif kind == "auto_reload":
+                            auto_reload = bool(c.get("on"))
+                            publish_holes()
                         elif kind == "click" and mode == "click":
                             row, col = float(c.get("v", -1)) * FRAME_H, float(c.get("u", -1)) * FRAME_W
                             xy = pixel_to_plate(env, row, col)
@@ -591,8 +759,20 @@ def main():
                                 print(f"click at pixel ({col:.0f},{row:.0f}) is not on the plate -- ignored")
                             else:
                                 px_per_m = 10.0 / max(np.hypot(*(xy2 - xy)), 1e-6) if xy2 is not None else 1000.0
-                                adopt_goal(xy, CLICK_R, None, None, (col, row), CLICK_R * px_per_m, "click")
-                                running = True
+                                if near_hole(holes, xy) is not None:
+                                    print("click is inside the hole's keep-out zone -- ignored")
+                                    publish_holes("that spot is too close to the hole -- use Drop into hole for that")
+                                else:
+                                    set_target(xy, CLICK_R, None, None, (col, row), CLICK_R * px_per_m, "click",
+                                               from_xy=(xb, yb))
+                                    running = True
+                if vias and running and np.hypot(xb - vias[0][0], yb - vias[0][1]) < VIA_REACH:
+                    vias.pop(0)
+                    c_, r_, pg_, cp_, px_, rp_, why_ = final_target
+                    if vias:
+                        adopt_goal(vias[0], VIA_R, pg_, cp_, px_, rp_, "next via point")
+                    else:
+                        adopt_goal(c_, r_, pg_, cp_, px_, rp_, why_ + ", past the hole")
                 line_ref = None
                 if mode in ("line", "path") and follower is not None and running:
                     if not line_active:
@@ -829,6 +1009,10 @@ def main():
                     in_circle = ball_found and inside_region(goal_polygon, (obs[0], obs[1]))
                 else:
                     in_circle = ball_found and dist < goal_tol
+                if vias:
+                    in_circle = False
+                if info.get("status") == "ball_lost":
+                    lost_xy = np.array(env._prev_ball, dtype=float)
                 ep_in_circle += int(in_circle)
                 ep_steps += 1
                 # learn the local level where the ball rests in the target
@@ -899,7 +1083,8 @@ def main():
                             c = np.median([cd[0] for cd in goal_cands], axis=0)
                             r_med = float(np.median([cd[1] for cd in goal_cands]))
                             ex = goal_cands[-1][2]
-                            adopt_goal(c, r_med, ex["polygon"], ex["contour_px"], ex["px"][:2], ex["px"][2], "sheet")
+                            set_target(c, r_med, ex["polygon"], ex["contour_px"], ex["px"][:2], ex["px"][2], "sheet",
+                                       from_xy=(float(obs[0]), float(obs[1])))
                             save_last_goal(goal, goal_tol, goal_polygon, goal_contour_px)
 
                 if now - last_snapshot >= SNAPSHOT_EVERY_S:
