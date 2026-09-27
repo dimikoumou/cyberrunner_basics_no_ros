@@ -79,6 +79,18 @@ PAGE = """<!doctype html>
           <button id="m_sheet">Red region on sheet</button>
           <button id="m_click">Click to target</button>
           <button id="m_line">Follow red line</button>
+          <button id="m_path">Draw path</button>
+        </div>
+        <div class="row" id="pathrow" style="margin-top:8px">
+          <button id="p_go">Go</button>
+          <button id="p_clear">Clear path</button>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>Controller</h2>
+        <div class="row">
+          <button id="c_classic">Classic</button>
+          <button id="c_learned">Learned (RL)</button>
         </div>
       </div>
       <div class="panel">
@@ -110,6 +122,11 @@ $('stop').onclick = () => cmd({cmd:'stop'});
 $('m_sheet').onclick = () => cmd({cmd:'mode', mode:'sheet'});
 $('m_click').onclick = () => cmd({cmd:'mode', mode:'click'});
 $('m_line').onclick = () => cmd({cmd:'mode', mode:'line'});
+$('m_path').onclick = () => cmd({cmd:'mode', mode:'path'});
+$('p_go').onclick = () => cmd({cmd:'path_go'});
+$('p_clear').onclick = () => cmd({cmd:'path_clear'});
+$('c_classic').onclick = () => cmd({cmd:'controller', which:'classic'});
+$('c_learned').onclick = () => cmd({cmd:'controller', which:'learned'});
 $('cam').addEventListener('click', ev => {
   const r = ev.target.getBoundingClientRect();
   cmd({cmd:'click', u:(ev.clientX - r.left) / r.width, v:(ev.clientY - r.top) / r.height});
@@ -119,10 +136,14 @@ async function poll() {
   try {
     const s = await (await fetch('/state')).json();
     $('s_run').innerHTML = s.running ? '<span class="ok">balancing</span>' : '<span class="bad">stopped</span>';
-    $('s_mode').textContent = {click:'click to target', sheet:'red region on sheet', line:'follow red line'}[s.mode] || s.mode;
+    $('s_mode').textContent = {click:'click to target', sheet:'red region on sheet', line:'follow red line', path:'drawn path'}[s.mode] || s.mode;
     $('m_sheet').classList.toggle('on', s.mode === 'sheet');
     $('m_click').classList.toggle('on', s.mode === 'click');
     $('m_line').classList.toggle('on', s.mode === 'line');
+    $('m_path').classList.toggle('on', s.mode === 'path');
+    $('pathrow').style.display = s.mode === 'path' ? 'flex' : 'none';
+    $('c_classic').classList.toggle('on', s.controller !== 'learned');
+    $('c_learned').classList.toggle('on', s.controller === 'learned');
     $('s_ball').textContent = s.ball ? `(${mm(s.ball[0])}, ${mm(s.ball[1])})` : 'not visible';
     $('s_goal').textContent = s.goal ? `(${mm(s.goal[0])}, ${mm(s.goal[1])}), r ${mm(s.goal_r)}` : 'none';
     $('s_dist').textContent = s.dist != null ? mm(s.dist) : '–';
@@ -130,6 +151,7 @@ async function poll() {
     $('s_hold').textContent = s.hold != null ? s.hold.toFixed(1) + ' s' : '–';
     $('s_hz').textContent = s.hz ? s.hz.toFixed(0) + ' Hz' : '–';
     $('hint').textContent = s.mode === 'click' ? 'Click the board to send the ball there'
+      : s.mode === 'path' ? (s.line_msg || 'Click points to draw a path, then press Go')
       : s.mode === 'line' ? (s.line_msg || 'Following the red line')
       : (s.goal ? 'Following the red region' : 'No red region found');
   } catch (e) { $('hint').textContent = 'Controller not reachable'; }
@@ -148,7 +170,7 @@ class UIServer:
         self._jpeg_seq = 0
         self._last_pub = 0.0
         self.state = {"running": False, "mode": "sheet", "ball": None, "goal": None, "goal_r": None,
-                      "dist": None, "in_target": False, "hold": None, "hz": None}
+                      "dist": None, "in_target": False, "hold": None, "hz": None, "controller": "classic"}
         self.overlay = {"contour_px": None, "goal_px": None, "goal_r_px": None, "ball_px": None,
                         "path_px": None, "path_closed": False}
         self._cmds = []
@@ -252,7 +274,8 @@ class UIServer:
             by, bx = ov["ball_px"]
             cv2.circle(img, (int(round(bx)), int(round(by))), 9, (0, 220, 255), 1, cv2.LINE_AA)
         label = ("BALANCING" if st.get("running") else "STOPPED") + "  |  " + {
-            "click": "click to target", "sheet": "red region", "line": "follow red line"}.get(st.get("mode"), "")
+            "click": "click to target", "sheet": "red region", "line": "follow red line",
+            "path": "drawn path"}.get(st.get("mode"), "")
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
         cv2.rectangle(img, (4, 4), (12 + tw, 12 + th), (0, 0, 0), -1)
         cv2.putText(img, label, (8, 8 + th), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)

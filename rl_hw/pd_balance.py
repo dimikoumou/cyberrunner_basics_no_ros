@@ -32,6 +32,8 @@ from goal_circle import (detect_goal_circle, detect_on_frame, save_debug, save_l
                          pixel_to_plate, inside_region)
 from ui_server import UIServer, FRAME_W, FRAME_H  # noqa: E402
 from line_path import detect_line, PathTracker  # noqa: E402
+from rl_policy import RigPolicyController  # noqa: E402
+from plate_env import LEVEL_OFFSET_DEG  # noqa: E402
 
 SNAPSHOT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pd_snapshots")
 SNAPSHOT_EVERY_S = float(os.environ.get("PD_SNAPSHOT_S", "2.0"))  # e.g. 30 for long unattended runs
@@ -293,6 +295,14 @@ def main():
     mode = "sheet"
     follower, line_off, line_msg = None, None, ""
     line_active, line_boost, line_ref = False, 0.0, None
+    path_pts, path_px = [], []          # "Draw path" mode: clicked waypoints (plate m / image px)
+    # learned controller (rl_sim/train_plate_ppo.py): PD_POLICY=<policy.npz> or UI toggle
+    policy_path = os.environ.get("PD_POLICY") or os.path.abspath(os.path.join(
+        os.path.dirname(__file__), "..", "rl_sim", "runs", "plate_goal_v1", "policy.npz"))
+    rl_ctrl = RigPolicyController(policy_path, LEVEL_OFFSET_DEG) if os.path.exists(policy_path) else None
+    use_policy = bool(os.environ.get("PD_POLICY")) and rl_ctrl is not None
+    if rl_ctrl is not None:
+        print(f"learned policy available: {policy_path}" + (" (ACTIVE)" if use_policy else ""))
     move, move_request, n_moves = None, False, 0
     try:
         with open(BIAS_TABLE_PATH) as f:
@@ -451,7 +461,17 @@ def main():
                                 running = True
                         elif kind == "stop":
                             running = False
-                        elif kind == "mode" and c.get("mode") in ("sheet", "click", "line"):
+                        elif kind == "controller":
+                            want = c.get("which") == "learned"
+                            if want and rl_ctrl is None:
+                                print("no trained policy found -- staying on the classic controller")
+                            else:
+                                use_policy = want
+                                if rl_ctrl is not None:
+                                    rl_ctrl.reset()
+                                move, phase, kick = None, "idle", np.zeros(2)
+                            ui.set_state(controller="learned" if use_policy else "classic")
+                        elif kind == "mode" and c.get("mode") in ("sheet", "click", "line", "path"):
                             mode = c["mode"]
                             live_goal = mode == "sheet"
                             follower, line_active = None, False
@@ -495,6 +515,34 @@ def main():
                             ui.set_state(mode=mode, line_msg=line_msg)
                             ui.set_overlay(path_px=None, contour_px=None)
                             running = True
+                        elif kind == "click" and mode == "path":
+                            row, col = float(c.get("v", -1)) * FRAME_H, float(c.get("u", -1)) * FRAME_W
+                            xy = pixel_to_plate(env, row, col)
+                            if xy is not None and abs(xy[0]) < env._x_half - 0.015 and abs(xy[1]) < env._y_half - 0.015:
+                                path_pts.append(xy)
+                                path_px.append((col, row))
+                                line_msg = f"{len(path_pts)} point(s) -- click more, then Go"
+                                ui.set_state(line_msg=line_msg)
+                                ui.set_overlay(path_px=np.array(path_px), path_closed=False, contour_px=None)
+                        elif kind == "path_clear":
+                            path_pts, path_px, follower, line_active = [], [], None, False
+                            line_msg = "Path cleared"
+                            ui.set_state(line_msg=line_msg)
+                            ui.set_overlay(path_px=None)
+                        elif kind == "path_go" and mode == "path":
+                            if len(path_pts) < 2:
+                                line_msg = "Click at least 2 points first"
+                            else:
+                                dense = [path_pts[0]]
+                                for p0, p1 in zip(path_pts[:-1], path_pts[1:]):
+                                    n = max(2, int(np.hypot(*(np.asarray(p1) - p0)) / 0.005))
+                                    dense += [p0 + (np.asarray(p1) - p0) * k / n for k in range(1, n + 1)]
+                                follower = PathTracker(np.array(dense), False, np.array([xb, yb]))
+                                line_active, line_boost = False, 0.0
+                                goal_polygon = goal_contour_px = goal_px = goal_r_px = None
+                                line_msg = f"Driving the path ({follower.L * 100:.0f} cm)"
+                                running = True
+                            ui.set_state(line_msg=line_msg)
                         elif kind == "click" and mode == "click":
                             row, col = float(c.get("v", -1)) * FRAME_H, float(c.get("u", -1)) * FRAME_W
                             xy = pixel_to_plate(env, row, col)
@@ -507,7 +555,7 @@ def main():
                                 adopt_goal(xy, CLICK_R, None, None, (col, row), CLICK_R * px_per_m, "click")
                                 running = True
                 line_ref = None
-                if mode == "line" and follower is not None and running:
+                if mode in ("line", "path") and follower is not None and running:
                     if not line_active:
                         # join: bring the ball to the route's current reference point first
                         # (a normal planned move), then start following
@@ -701,16 +749,21 @@ def main():
                 # _attempt_unstick(), which is the only thing that has ever
                 # actually freed the ball from this specific spot. Let the wedge
                 # detector fire and do its job instead of masking it.
+                if use_policy and running and mode not in ("line", "path"):
+                    action = rl_ctrl.action(goal, goal_tol, (xb, yb), (vx, vy), alpha, beta).astype(np.float32)
+                    move, phase, kick = None, "idle", np.zeros(2)
                 if not running:
                     action = np.zeros(2, dtype=np.float32)   # stopped: hold the plate level
                     phase, kick, move = "idle", np.zeros(2), None
                 obs, reward, terminated, truncated, info = env.step(action)
+                if rl_ctrl is not None:
+                    rl_ctrl.record_applied(env._last_commanded_action)
                 dist = float(np.hypot(obs[6], obs[7]))
                 # Only a frame where the ball was actually detected counts: during
                 # step()'s not-found grace frames obs holds the frozen last position.
                 ball_found = bool(info.get("ball_found", True))
                 last_found = ball_found
-                if mode == "line" and follower is not None:
+                if mode in ("line", "path") and follower is not None:
                     in_circle = ball_found and line_off is not None and line_off < LINE_TOL * 1.25
                 elif goal_polygon is not None and len(goal_polygon) >= 3:
                     in_circle = ball_found and inside_region(goal_polygon, (obs[0], obs[1]))
@@ -749,7 +802,7 @@ def main():
                     ui.set_state(running=running, mode=mode,
                                  ball=[float(obs[0]), float(obs[1])] if ball_found else None,
                                  goal=[goal[0], goal[1]], goal_r=goal_tol,
-                                 dist=(line_off if (mode == "line" and follower is not None) else dist) if ball_found else None,
+                                 dist=(line_off if (mode in ("line", "path") and follower is not None) else dist) if ball_found else None,
                                  in_target=bool(in_circle), hold=(now - hold_start) if hold_start else 0.0,
                                  hz=(1.0 / dt_real) if dt_real > 0 else None)
                     ui.set_overlay(ball_px=getattr(env.pipeline.measurements.detector, "ball_pos", None) if ball_found else None,

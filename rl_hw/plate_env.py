@@ -125,6 +125,7 @@ LEVEL_TOL_DEG = 0.4
 # brake command reached the plate as -2.1..-2.4deg and reversed the ball. Compare
 # each measurement with the target that was active when that frame was taken.
 TILT_MEAS_DELAY_STEPS = {1: 4, 3: 5}
+CAMERA_STALL_S = 2.0
 # Camera-frame angle at which the ball does NOT accelerate, i.e. true gravity level
 # expressed in the camera's (outer-frame) world frame. Estimated 2026-09-26 by
 # regressing ball acceleration on measured tilt over a whole PD run
@@ -548,11 +549,28 @@ class HardwarePlateEnv(gym.Env):
         self._reader_stop = False
 
         def _reader():
+            # Camera watchdog (2026-09-26: the camera once stopped delivering frames
+            # while still listed by macOS): after CAMERA_STALL_S without a frame,
+            # release it and reopen the rig camera (index may have changed).
+            last_ok, last_reopen = time.time(), 0.0
             while not self._reader_stop:
                 ok, frame = self.cap.read()
                 if not ok or frame is None:
+                    now = time.time()
+                    if now - last_ok > CAMERA_STALL_S and now - last_reopen > CAMERA_STALL_S:
+                        last_reopen = now
+                        print(f"[HardwarePlateEnv] no camera frame for {now - last_ok:.1f}s -- reopening the camera")
+                        try:
+                            self.cap.release()
+                            idx = _find_rig_camera()
+                            self.cap, _, _ = init_capture("CAM", idx, None, None)
+                            self.cap.set(cv2.CAP_PROP_FPS, 30)
+                            print(f"[HardwarePlateEnv] camera reopened (index {idx})")
+                        except Exception as e:
+                            print(f"[HardwarePlateEnv] camera reopen failed: {e}")
                     time.sleep(0.005)
                     continue
+                last_ok = time.time()
                 with self._frame_lock:
                     self._latest_frame = frame
                     self._latest_seq += 1
