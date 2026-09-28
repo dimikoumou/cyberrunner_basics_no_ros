@@ -76,10 +76,10 @@ def tilt_calibration(env, setp, log=print):
         log(f"  motor {dxl_id}: {gain_up * 100:.2f} / {gain_down * 100:.2f} deg per 100 ticks (up/down), "
             f"play {play:.2f} deg, {rel * 100:.0f} % of the expected response")
         if min(gain_up, gain_down) < 0.5 * EXPECTED_DEG_PER_TICK[dxl_id]:
-            warnings.append(f"motor {dxl_id} barely moves the plate in one direction "
-                            f"({min(gain_up, gain_down) * 100:.2f} deg per 100 ticks) -- link slipping or blocked?")
+            warnings.append(f"motor {dxl_id} responds more weakly in one direction "
+                            f"({min(gain_up, gain_down) * 100:.2f} deg per 100 ticks) -- the camera loop compensates")
         if play > 1.5:
-            warnings.append(f"motor {dxl_id}: {play:.1f} deg of play (backlash) -- the camera loop covers it")
+            warnings.append(f"motor {dxl_id}: {play:.1f} deg of play -- the camera loop covers it")
     env._servo_level(max_s=5.0)
     try:
         with open(CAL_PATH) as f:

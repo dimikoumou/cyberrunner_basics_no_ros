@@ -58,10 +58,13 @@ def display_instructions():
 def set_position(portHandler, packetHandler, dxl_id, position):
     """Set the position of a motor."""
     # Ensure position is within safe limits
-    position = max(0, min(4095, position))  # Dynamixel position range is 0-4095 for 360-degree rotation
-    
+    # 2026-09-28: motor 3 runs in extended position (multi-turn) mode, whose goal range is
+    # +-1,048,575; the per-motor bounds are enforced by the caller (plate_env TICK_BOUNDS / caps).
+    # Negative goals go out as two's complement.
+    position = int(max(-1048575, min(1048575, position)))
+
     dxl_comm_result, dxl_error = packetHandler.write4ByteTxRx(
-        portHandler, dxl_id, ADDR_GOAL_POSITION, position)
+        portHandler, dxl_id, ADDR_GOAL_POSITION, position & 0xFFFFFFFF)
         
     if dxl_comm_result != dxl.COMM_SUCCESS:
         print(f"Motor {dxl_id} communication error: {packetHandler.getTxRxResult(dxl_comm_result)}")
@@ -134,7 +137,7 @@ def read_motor_positions(portHandler, packetHandler, dxl_ids):
             print(f"Dynamixel error on motor {dxl_id}: {packetHandler.getRxPacketError(dxl_error)}")
             positions[dxl_id] = None
         else:
-            positions[dxl_id] = position
+            positions[dxl_id] = position - 2 ** 32 if position >= 2 ** 31 else position   # signed (multi-turn)
     
     return positions
 
