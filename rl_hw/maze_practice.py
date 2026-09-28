@@ -154,7 +154,7 @@ class MazePractice:
             if len(near) >= 3:
                 c = int(np.median(near))
                 lo_, hi_ = max(0, c - w5), min(self.n, c + w5)
-                self.slow[self.ctl][lo_:hi_] = np.maximum(0.3, self.slow[self.ctl][lo_:hi_] * 0.7)
+                self.slow[self.ctl][lo_:hi_] = np.maximum(0.6, self.slow[self.ctl][lo_:hi_] * 0.85)   # min 0.3 made it crawl and stick-slip
                 self.fail_at[self.ctl] = [i for i in fa if abs(i - c) > w3]
                 np.save(os.path.join(ROOT, "maze", f"slow_{self.ctl}.npy"), self.slow[self.ctl])
                 print(f"  maze: {self.ctl} slows down around {100 * c / self.n:.0f} % of the route "
