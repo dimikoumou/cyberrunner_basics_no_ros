@@ -139,10 +139,14 @@ TILT_OPEN_LOOP = os.environ.get("PLATE_TILT_OPEN_LOOP") == "1"     # default: ca
 # correct, except further in a direction where the CAMERA-measured angle is already more than
 # ANGLE_GUARD_DEG from level -- beyond the 5 deg working range, short of the ~10 deg stop.
 ANGLE_GUARD_DEG = 7.0
+# Independent last-resort cap (2026-09-27): never more than MOTOR_CAP_DEG of motor travel from
+# the level position found (camera, trusted pose) in THIS session -- a wrong camera reading can
+# then no longer drive a motor to its tick limit.
+MOTOR_CAP_DEG = 8.0
 STALL_TICKS = 10 ** 9   # (tick-count stall guard disabled)
 STALL_GAIN_DEG = 0.3
 STALL_RETARGET_DEG = 2.0   # a new command (target moved this much) is a fresh attempt
-TICK_BOUNDS = {1: (1800, 3900), 3: (700, 3800)}  # where each axis's angle plateaus (measured)
+TICK_BOUNDS = {1: (1800, 3900), 3: (60, 4030)}  # m3 widened 2026-09-27: its link slips, level moved 2800 -> 930; the camera angle guard + session cap (MOTOR_CAP_DEG) protect it
 LEVEL_TOL_DEG = 0.4
 # Delay-aligned correction (research workflow 2026-09-26, Smith-predictor idea):
 # the camera tilt is 4 (alpha) / 5 (beta) steps old at the ~29 Hz loop (lag from
@@ -753,6 +757,10 @@ class HardwarePlateEnv(gym.Env):
                     ff, corr = 0.0, 0.0
             delta = float(np.clip(ff + corr, -MAX_TICKS_PER_STEP, MAX_TICKS_PER_STEP))
             lo, hi = TICK_BOUNDS[dxl_id]
+            lvl = getattr(self, "_session_level", {}).get(dxl_id)
+            if lvl is not None:
+                cap = abs(MOTOR_CAP_DEG * tpd)
+                lo, hi = max(lo, int(lvl - cap)), min(hi, int(lvl + cap))
             pos = int(np.clip(self._cmd_ticks.get(dxl_id, (lo + hi) // 2) + delta, lo, hi))
             self._cmd_ticks[dxl_id] = pos
             set_position(self.port_handler, self.packet_handler, dxl_id, pos)
@@ -785,6 +793,7 @@ class HardwarePlateEnv(gym.Env):
         a, b = self._meas_tilt if self._meas_tilt is not None else (np.nan, np.nan)
         m1, m3 = self._cmd_ticks.get(1), self._cmd_ticks.get(3)
         if ok >= 8:
+            self._session_level = {1: int(m1), 3: int(m3)}      # the motor cap is relative to this
             try:
                 with open(LAST_LEVEL_CACHE_PATH, "w") as f:
                     json.dump({"m1": m1, "m3": m3}, f)

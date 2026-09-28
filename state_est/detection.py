@@ -332,6 +332,7 @@ class Detector:
         """
         corners = np.zeros((4, 2), dtype="float32")
         missing = False
+        held = []
         for i in range(4):
             # 2026-09-27: a ball right beside a plate marker merges with / pulls the marker
             # blob, and the whole plate pose (tilt readings of 5-10 deg, ball position) goes
@@ -341,6 +342,7 @@ class Detector:
                     and np.all(np.isfinite(self.ball_pos))
                     and np.hypot(*(np.asarray(self.ball_pos, dtype=float) - self.corners[i, :])) < BALL_NEAR_CORNER_PX):
                 corners[i, :] = self.corners[i, :]
+                held.append(i)
                 continue
             if self.corners is not None and not self.corners_missing:
                 center_pos = self.corners[i, :]
@@ -350,6 +352,16 @@ class Detector:
                 center_pos = (ul + dr) / 2.0
             corners[i, :], found = self._detect_corner_with_fallback(frame, i, center_pos)
             missing = missing or not found
+        # 2026-09-27: a held marker must still MOVE with the plate -- frozen, it under-read the
+        # tilt while the plate tilted a lot and the servo ran both motors to their limits. The plate
+        # is rigid: move it with the affine transform that takes the other three markers from
+        # their last to their current positions.
+        if len(held) == 1 and self.corners is not None and not missing:
+            others = [j for j in range(4) if j != held[0]]
+            A = cv2.getAffineTransform(self.corners[others].astype(np.float32)[:, ::-1],
+                                       corners[others].astype(np.float32)[:, ::-1])
+            p = self.corners[held[0]][::-1]
+            corners[held[0]] = (A @ np.array([p[0], p[1], 1.0]))[::-1]
         self.corners_missing = missing
         #print("found corners: \n", corners)
         self.corners = corners
