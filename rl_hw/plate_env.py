@@ -297,6 +297,8 @@ class HardwarePlateEnv(gym.Env):
         self._tilt_target = LEVEL_OFFSET_DEG  # last target (alpha, beta) in degrees
         self._meas_tilt = None          # last plausible measured (alpha, beta) in degrees
         self._stall = {}                # dxl_id -> correction-without-response tracker (see STALL_TICKS)
+        self._capped_steps = {}
+        self.motor_not_following = None
         self._pose_ok = True
         self._target_hist = []          # recent (alpha, beta) targets, newest last
         self._last_commanded_action = np.zeros(2, dtype=np.float32)
@@ -391,6 +393,9 @@ class HardwarePlateEnv(gym.Env):
         for dxl_id, target in startup.items():
             set_position(self.port_handler, self.packet_handler, dxl_id, target)
             self._cmd_ticks[dxl_id] = int(target)
+        # motor cap reference even if the camera levelling never settles (2026-09-28: it did not,
+        # there was no cap, and motor 3 turned ~3000 ticks without the plate following)
+        self._session_level = {int(k): int(v) for k, v in startup.items()}
         time.sleep(1.5)
 
         self._prime_camera_localization()
@@ -761,7 +766,17 @@ class HardwarePlateEnv(gym.Env):
             if lvl is not None:
                 cap = abs(MOTOR_CAP_DEG * tpd)
                 lo, hi = max(lo, int(lvl - cap)), min(hi, int(lvl + cap))
-            pos = int(np.clip(self._cmd_ticks.get(dxl_id, (lo + hi) // 2) + delta, lo, hi))
+            want = self._cmd_ticks.get(dxl_id, (lo + hi) // 2) + delta
+            pos = int(np.clip(want, lo, hi))
+            # a motor held at its cap while the measured angle stays >3 deg off the target for
+            # ~3 s = the plate is not following it (linkage slipping / loose): report it so the
+            # controller stops instead of holding the motor there (2026-09-28)
+            if self._pose_ok and pos != want and abs(target_then - meas[i]) > 3.0:
+                self._capped_steps[dxl_id] = self._capped_steps.get(dxl_id, 0) + 1
+            else:
+                self._capped_steps[dxl_id] = 0
+            if self._capped_steps[dxl_id] > 90:
+                self.motor_not_following = dxl_id
             self._cmd_ticks[dxl_id] = pos
             set_position(self.port_handler, self.packet_handler, dxl_id, pos)
         self._tilt_target = target

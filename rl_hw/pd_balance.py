@@ -1259,6 +1259,17 @@ def main():
                 if env.hold_level:
                     action = np.zeros(2, dtype=np.float32)
                     phase, kick, move = "idle", np.zeros(2), None
+                if getattr(env, "motor_not_following", None) is not None and running:
+                    _alert(f"motor {env.motor_not_following} turns but the plate does not follow (linkage slipping?) "
+                           f"-- stopped, plate levelled")
+                    if maze is not None and maze.active:
+                        maze.end_run("stopped: motor not following")
+                    running, mode, follower, line_active = False, "click", None, False
+                    env.motor_not_following = None
+                    env._capped_steps = {}
+                    if ui is not None:
+                        ui.set_state(running=False, mode=mode, maze_msg="STOPPED: a motor turns but the plate does not follow")
+                    action = np.zeros(2, dtype=np.float32)
                 prev_applied = np.array(env._last_commanded_action, dtype=float)
                 obs, reward, terminated, truncated, info = env.step(action)
                 # smoothness (same "jerk" as rl_sim/eval_controllers): squared change of the
