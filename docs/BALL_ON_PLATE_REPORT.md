@@ -267,6 +267,22 @@ command per step, as in the simulator; one RL trip lost to the hole):
 Pure ODIL moves the plate about **half as jerkily** as the classic controller or RL + settle,
 and ODIL + settle had the best time-in-target of this round. (10 trips per setup: indicative.)
 
+### Large rig comparison (120 random targets, 30 per setup)
+Same random targets, white paper with hole and taped side, after the marker-hold and
+angle-guard fixes. "Inside after" = share of the 4 s after arrival spent inside the 12 mm
+target (mean ± 95 % CI); jerk = median per trip.
+
+| Setup | Reached | Taped side | Time to reach | Inside after | Final distance | Jerk (median) |
+|---|---|---|---|---|---|---|
+| Classic | 30/30 | 9/9 | 1.9 s | 0.56 ± 0.10 | 7.0 mm | 0.0095 |
+| RL + settle | 30/30 | 6/6 | 1.2 s | 0.68 ± 0.10 | 7.1 mm | 0.0107 |
+| **ODIL v6 + fc (pure)** | **29/29** | 6/6 | 1.6 s | **0.68 ± 0.05** | 9.2 mm | **0.0039** |
+| ODIL v6 + fc + settle | 30/30 | 6/6 | 1.6 s | 0.68 ± 0.11 | 7.1 mm | 0.0083 |
+
+**Result:** pure ODIL keeps the ball in the target as well as RL + settle and ODIL + settle
+(and more consistently: the narrowest interval), and moves the plate **~2.5x more smoothly**
+than every other setup. RL + settle is the fastest. (One ODIL trip excluded: ball lost.)
+
 ## 9. Recommended next steps
 
 1. **Pure ODIL near-field precision** (10.8 mm vs ~6 mm for the hybrids): v10 (4-stage delay,
