@@ -26,7 +26,10 @@ ILC_LEAD_S = 0.15            # the loop reacts ~0.15 s late: correct that much e
 ILC_MAX = 0.008              # m, never shift the reference further than this (15 mm let it drift into walls)
 MAZE_SPEED = float(os.environ.get("PD_MAZE_SPEED", "0.025"))
 STALL_S = 15.0
-LEARN = os.environ.get("PD_MAZE_LEARN", "1") == "1"   # 0: no ILC / slow zones (diagnostic baseline)               # no progress along the route for this long -> the run counts as stuck
+LEARN = os.environ.get("PD_MAZE_LEARN", "1") == "1"   # 0: no ILC / slow zones (diagnostic baseline)
+# the real maze board: holes and walls are physical -- a fall is the ball disappearing (the
+# controller then reloads it), walls may be leaned on; only the stall timeout is checked here
+REAL = os.environ.get("PD_MAZE_REAL") == "1"               # no progress along the route for this long -> the run counts as stuck
 CONTROLLERS = tuple(os.environ.get("PD_MAZE_CONTROLLERS", "odil,blend").split(","))   # blend = mean of ODIL and classic (classic alone dropped: stuck at ~8 %)
 
 
@@ -106,6 +109,8 @@ class MazePractice:
         self.max_idx = max(self.max_idx, idx)
         if now - self.t_progress > STALL_S:
             return "stuck (no progress for 15 s)"
+        if REAL:
+            return None
         for k, (c, r) in enumerate(self.holes):
             if np.hypot(*(b - c)) < r:
                 return f"fell into hole {k}"
@@ -161,7 +166,8 @@ class MazePractice:
                 np.save(os.path.join(ROOT, "maze", f"slow_{self.ctl}.npy"), self.slow[self.ctl])
                 print(f"  maze: {self.ctl} slows down around {100 * c / self.n:.0f} % of the route "
                       f"(now x{self.slow[self.ctl][c]:.2f})")
-        rec = {"t": time.time(), "run": self.run_no, "controller": self.ctl, "learn": LEARN, "result": result,
+        rec = {"t": time.time(), "run": self.run_no, "controller": self.ctl, "learn": LEARN, "real": REAL,
+               "policy": os.environ.get("PD_ODIL_TRACK", "default"), "result": result,
                "progress": progress, "duration_s": time.time() - self.t0, "jerk": jerk, **acc}
         os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
         with open(LOG_PATH, "a") as f:

@@ -105,7 +105,12 @@ def rollout(pol, P, V, A, rng, train=True):
         ubuf = ubuf[1:] + [u_ap]
         u_plate = torch.stack(ubuf)[len(ubuf) - 1 - dly, ar]
         h = DT / SUB
-        for _ in range(SUB):
+        if WM is not None:
+            # learned world model: its own delay, lag, friction and learned correction
+            u_wm = ubuf[-1 - WM.delay] if len(ubuf) > WM.delay else ubuf[0]
+            uh = torch.stack(ubuf[-4:], 1) if len(ubuf) >= 4 else torch.stack([ubuf[0]] * (4 - len(ubuf)) + ubuf, 1)
+            p, v, tilt = WM.step(p, v, tilt, uh, u_wm, dt=DT, sub=SUB)
+        for _ in range(SUB if WM is None else 0):
             tilt = tilt + (u_plate - tilt) * (h / tau)
             speed = torch.sqrt((v ** 2).sum(-1, keepdim=True) + EPS_V ** 2)
             drive = k_acc * (tilt + bias)
@@ -135,6 +140,7 @@ def rollout(pol, P, V, A, rng, train=True):
 
 OBST = None
 _ROUTE_REF = None
+WM = None      # learned world model (world_model.py): FT_WORLD=<model.pt> replaces the hand physics
 
 
 def _load_route():
@@ -183,6 +189,14 @@ def main():
     init, name = sys.argv[1], sys.argv[2]
     if ROUTE:
         _load_route()
+    if os.environ.get("FT_WORLD"):
+        global WM
+        from world_model import WorldModel
+        WM = WorldModel(delay=int(os.environ.get("WM_DELAY", "3")))
+        WM.load_state_dict(torch.load(os.environ["FT_WORLD"]))
+        for q in WM.parameters():
+            q.requires_grad_(False)
+        print("practising in the learned world model", os.environ["FT_WORLD"])
     iters = int(sys.argv[3]) if len(sys.argv) > 3 else 1500
     out = os.path.join(HERE, "runs", name)
     os.makedirs(out, exist_ok=True)

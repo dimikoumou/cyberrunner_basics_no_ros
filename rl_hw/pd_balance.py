@@ -1309,6 +1309,18 @@ def main():
                     in_circle = False
                 if info.get("status") == "ball_lost":
                     lost_xy = np.array(env._prev_ball, dtype=float)
+                    if mode == "maze" and maze is not None and maze.active and maze_following:
+                        # the real maze: the ball fell through a hole -> the run ends here; the
+                        # reload brings it back and the next run starts from the start
+                        k_ = None
+                        if maze.holes:
+                            k_ = int(np.argmin([np.hypot(*(lost_xy - c)) for c, _ in maze.holes]))
+                        print("maze:", maze.end_run(f"fell into a real hole (near {k_})",
+                                                    (jerk_sum - draw_j0[0]) / max(1, jerk_n - draw_j0[1])))
+                        maze_following = False
+                        follower = maze.start_run(maze.ctl, PathTracker, (xb, yb))
+                        line_active, line_ref, move = False, None, None
+                        draw_j0 = (jerk_sum, jerk_n)
                 ep_in_circle += int(in_circle)
                 ep_steps += 1
                 # learn the local level where the ball rests in the target
