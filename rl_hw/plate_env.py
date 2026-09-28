@@ -134,8 +134,9 @@ TILT_OPEN_LOOP = os.environ.get("PLATE_TILT_OPEN_LOOP") == "1"     # default: ca
 # plate was NOT following motor 3 (its link slipped): the loop kept adding ticks. If a motor
 # has moved STALL_TICKS by correction without the measured angle improving by STALL_GAIN_DEG,
 # further correction in that direction is refused (and logged) until the angle responds.
-STALL_TICKS = 400
-STALL_GAIN_DEG = 0.5
+STALL_TICKS = 700       # ~7 deg: motor 3's link has ~300 ticks of play before the plate follows
+STALL_GAIN_DEG = 0.3
+STALL_RETARGET_DEG = 2.0   # a new command (target moved this much) is a fresh attempt
 TICK_BOUNDS = {1: (1800, 3900), 3: (700, 3800)}  # where each axis's angle plateaus (measured)
 LEVEL_TOL_DEG = 0.4
 # Delay-aligned correction (research workflow 2026-09-26, Smith-predictor idea):
@@ -728,8 +729,10 @@ class HardwarePlateEnv(gym.Env):
                 corr = TILT_GAIN * err * tpd
                 cur = self._cmd_ticks.get(dxl_id)
                 st = self._stall.get(dxl_id)
-                if st is None or cur is None or abs(err) < st["err"] - STALL_GAIN_DEG:
-                    st = self._stall[dxl_id] = {"ticks": cur, "err": abs(err), "warned": False}
+                if (st is None or cur is None or abs(err) < st["err"] - STALL_GAIN_DEG
+                        or abs(target_then - st.get("target", target_then)) > STALL_RETARGET_DEG):
+                    st = self._stall[dxl_id] = {"ticks": cur, "err": abs(err), "warned": False,
+                                                "target": target_then}
                 st["ticks"] = (st["ticks"] or 0) + ff                 # feedforward moves are legitimate
                 moved = (cur or 0) - st["ticks"]
                 if abs(moved) > STALL_TICKS and np.sign(corr) == np.sign(moved):

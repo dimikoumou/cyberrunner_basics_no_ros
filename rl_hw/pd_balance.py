@@ -35,6 +35,8 @@ from goal_circle import (detect_goal_circle, detect_on_frame, save_debug, save_l
 from ui_server import UIServer, FRAME_W, FRAME_H  # noqa: E402
 from line_path import detect_line, PathTracker  # noqa: E402
 import shapes  # noqa: E402
+import calibrate  # noqa: E402
+from plate_env import set_position as _set_position  # noqa: E402
 from rl_policy import RigPolicyController, ODILRigController, ODILFrictionCompRig  # noqa: E402
 from elevator import Elevator  # noqa: E402
 from hole import detect_holes_stable, save_holes, near_hole, detour, HOLE_MARGIN_M  # noqa: E402
@@ -223,7 +225,7 @@ GOAL = (-0.0078, 0.0060)
 # reloaded by the elevator (motor 2) and the task continues
 VIA_R = 0.012                          # target radius of a via point round a hole
 VIA_REACH = 0.02                       # this close to a via point -> head for the next one
-RELOAD_TIMEOUT_S = 300.0               # ball lost: elevator runs until the ball is seen again (safety cap)
+RELOAD_TIMEOUT_S = 60.0                # ball lost: elevator runs until the ball is seen again, at most 60 s (user)
 RELOAD_UNITS = int(os.environ.get("PD_RELOAD_UNITS", "328"))      # elevator speed for a reload (~75 rpm)
 RELOAD_SEEN_FRAMES = 5                 # ball visible on the paper this many frames in a row = reloaded
 GOAL_TOLERANCE = 0.0455
@@ -541,6 +543,7 @@ def main():
 
     xb = yb = 0.0
     draw_what = "path"
+    tour, tour_t0, cal_msg = [], 0.0, ""
     jerk_sum, jerk_n = 0.0, 0
     lost_xy = None
     lost_since, lost_alerted = None, False
@@ -810,6 +813,30 @@ def main():
                                     ui.set_state(mode=mode)
                                 set_target(xy, float(c.get("r", CLICK_R)), why="scripted", from_xy=(xb, yb))
                                 running = True
+                        elif kind == "calibrate":
+                            # self-calibration: level + motor response (blocking, ~25 s), then
+                            # the ball tours a 3x3 grid so the classic controller learns the slopes
+                            ui.set_state(cal_msg="calibrating: level and motor check…")
+                            use_policy = use_odil = False
+                            ui.set_state(controller="classic")
+                            res, warns = calibrate.tilt_calibration(env, _set_position)
+                            if res is None:
+                                cal_msg = "; ".join(warns)
+                            else:
+                                mot = res["motors"]
+                                cal_msg = "level at m1 {} / m3 {}. ".format(res["level_ticks"]["1"], res["level_ticks"]["3"]) + \
+                                    " ".join(f"motor {k}: {v['response_vs_expected'] * 100:.0f} % response, "
+                                             f"{v['play_deg']:.1f} deg play." for k, v in mot.items()) + \
+                                    (" WARNINGS: " + "; ".join(warns) if warns else " No warnings.")
+                                tour = [np.array(q) for q in calibrate.TOUR if near_hole(holes, q, extra=0.01) is None]
+                                mode, live_goal = "click", False
+                                ui.set_state(mode=mode)
+                                set_target(tour[0], 0.012, why="calibration tour", from_xy=(xb, yb))
+                                tour_t0, running = time.time(), True
+                                cal_msg += f" Slope tour: 1/{len(tour)}"
+                            print("calibration:", cal_msg)
+                            ui.set_state(cal_msg=cal_msg)
+                            obs, _, _, _, info = env.step(np.zeros(2, dtype=np.float32))
                         elif kind == "drop_test":
                             if not holes:
                                 publish_holes("no hole found -- press Find holes")
@@ -1148,6 +1175,18 @@ def main():
                     best_hold = max(best_hold, now - hold_start)
                 elif ball_found or info["status"] == "ball_lost":
                     hold_start = None
+                if tour and running and ((hold_start and now - hold_start > 2.5) or now - tour_t0 > 15.0):
+                    tour.pop(0)
+                    if tour:
+                        set_target(tour[0], 0.012, why="calibration tour", from_xy=(float(obs[0]), float(obs[1])))
+                        tour_t0 = now
+                        cal_msg = cal_msg.rsplit(" Slope tour:", 1)[0] + \
+                            f" Slope tour: {len(calibrate.TOUR) - len(tour) + 1}/{len(calibrate.TOUR)}"
+                    else:
+                        cal_msg = cal_msg.rsplit(" Slope tour:", 1)[0] + f" Slope tour done ({len(bias_table)} areas learned)."
+                        print("calibration:", cal_msg)
+                    if ui is not None:
+                        ui.set_state(cal_msg=cal_msg)
                 if elevator is not None:
                     elevator.poll()
                     ui.set_state(**elevator.state())

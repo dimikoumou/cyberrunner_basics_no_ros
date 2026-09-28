@@ -98,6 +98,11 @@ PAGE = """<!doctype html>
         </label>
       </div>
       <div class="panel">
+        <h2>Self-calibration</h2>
+        <div class="row"><button id="cal_go">Self-calibrate (about 2 min)</button></div>
+        <div class="msg" id="cal_msg">–</div>
+      </div>
+      <div class="panel">
         <h2>Draw with the ball</h2>
         <div class="row">
           <button data-shape="circle">Circle</button>
@@ -200,6 +205,7 @@ const dSize = () => parseInt($('d_size').value, 10) / 1000;
 $('d_size').addEventListener('input', () => { $('d_size_lbl').textContent = (dSize() * 100).toFixed(1) + ' cm'; });
 document.querySelectorAll('[data-shape]').forEach(b => b.onclick = () => cmd({cmd:'draw_shape', shape:b.dataset.shape, size:dSize()}));
 $('d_write').onclick = () => cmd({cmd:'draw_shape', text:$('d_text').value, size:dSize()});
+$('cal_go').onclick = () => cmd({cmd:'calibrate'});
 $('h_drop').onclick = () => cmd({cmd:'drop_test', n:1});
 $('h_drop5').onclick = () => cmd({cmd:'drop_test', n:5});
 $('h_detect').onclick = () => cmd({cmd:'holes_detect'});
@@ -257,6 +263,7 @@ async function poll() {
     }
     if (s.auto_reload !== undefined) $('h_reload').checked = s.auto_reload;
     if (s.hole_msg !== undefined) $('h_status').textContent = s.hole_msg;
+    if (s.cal_msg) $('cal_msg').textContent = s.cal_msg;
     $('s_ctrl').textContent = (s.controller || 'classic').endsWith('+classic settle') ? 'classic (near-field settle)'
       : s.controller === 'learned' ? 'learned RL' : s.controller === 'odil' ? 'ODIL' : 'classic';
     $('hint').textContent = s.mode === 'click' ? 'Click the board to send the ball there'
