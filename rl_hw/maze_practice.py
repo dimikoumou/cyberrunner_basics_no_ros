@@ -25,6 +25,7 @@ ILC_GAIN = 0.5
 ILC_LEAD_S = 0.15            # the loop reacts ~0.15 s late: correct that much earlier
 ILC_MAX = 0.015              # m, never shift the reference further than this
 MAZE_SPEED = float(os.environ.get("PD_MAZE_SPEED", "0.025"))
+STALL_S = 15.0               # no progress along the route for this long -> the run counts as stuck
 CONTROLLERS = ("classic", "odil", "blend")   # blend = mean of the ODIL and classic line commands
 
 
@@ -78,6 +79,7 @@ class MazePractice:
         self.t0 = time.time()
         self.samples = []                              # (route index, ball xy)
         self.max_idx = 0
+        self.t_progress = None
         self.follower = tracker_cls(self.route, False, np.asarray(ball_xy), keep_direction=True, v=MAZE_SPEED,
                                     ref_offset=self.ilc[ctl])
         self.active = True
@@ -91,7 +93,12 @@ class MazePractice:
         idx = int(np.searchsorted(self.follower.S, self.follower._project(b, self.follower.s)))
         idx = min(idx, self.n - 1)
         self.samples.append((idx, b.copy()))
+        now = time.time()
+        if self.t_progress is None or idx > self.max_idx + 2:
+            self.t_progress = now
         self.max_idx = max(self.max_idx, idx)
+        if now - self.t_progress > STALL_S:
+            return "stuck (no progress for 15 s)"
         for k, (c, r) in enumerate(self.holes):
             if np.hypot(*(b - c)) < r:
                 return f"fell into hole {k}"

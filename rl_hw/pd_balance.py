@@ -1149,6 +1149,9 @@ def main():
                         a_odil = np.asarray(track_ctrl(line_ref, pos, vel, dt_real if dt_real > 0 else None), dtype=np.float32)
                         if mode == "maze" and maze_blend:
                             a_odil = 0.5 * a_odil + 0.5 * np.asarray(a_line, dtype=np.float32)   # ODIL + classic
+                        # the same breakaway boost as the classic line law, in full: a ball stuck on the
+                        # paper behind the reference stayed there (the ODIL tracker has no stiction term)
+                        a_odil = a_odil + (1.0 if not (mode == "maze" and maze_blend) else 0.5) * line_boost * th_
                         action = np.clip(a_odil, -0.8, 0.8)
                 elif track_ctrl is not None:
                     track_ctrl.reset()          # fresh observer / integral for the next line
