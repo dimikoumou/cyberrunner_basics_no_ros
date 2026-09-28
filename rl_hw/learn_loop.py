@@ -10,7 +10,8 @@ Each round:
      logs of the recent rounds, warm-started from the previous round;
   4. the policy practises the route in that world model (rl_sim/finetune_track.py with
      FT_WORLD, holes/walls penalised), starting from the current policy;
-  5. the new policy drives the next round.
+  5. the new policy drives the next round (swapped into the running controller -- a
+     controller restart per round froze the camera).
 Round results (runs, mean/best progress, finishes) go to phase3_logs/learn_loop.jsonl -- the
 learning curve. Stop: touch phase3_logs/STOP_LOOP.
 
@@ -85,11 +86,24 @@ def runs_since(t0):
         return []
 
 
+def controller_up():
+    try:
+        state()
+        return bool(controller_pids())
+    except (OSError, ValueError):
+        return False
+
+
 def drive_round(policy, real):
-    stop_controller()
-    if not start_controller(policy, real):
-        raise RuntimeError("controller did not start")
-    time.sleep(2)
+    # the controller keeps running between rounds; the new policy is swapped in by command
+    # (restarting it every round froze the camera -- only (re)start it if it is not up)
+    if not controller_up():
+        stop_controller()
+        if not start_controller(policy, real):
+            raise RuntimeError("controller did not start")
+        time.sleep(2)
+    cmd(cmd="track_policy", path=policy)
+    time.sleep(1)
     cmd(cmd="maze_start", alternate=True, controller="odil")
     t0 = time.time()
     while True:
@@ -140,8 +154,10 @@ def main():
         with open(LOOP_LOG, "a") as f:
             f.write(json.dumps(rec) + "\n")
         print("  world model:", wm_msg, "\n  refine:", ft_last, flush=True)
-    stop_controller()
-    start_controller(policy, real)       # leave the rig idle-ready with the latest policy
+    try:
+        cmd(cmd="track_policy", path=policy)    # leave the rig idle-ready with the latest policy
+    except OSError:
+        pass
     print("loop done; latest policy", policy)
 
 

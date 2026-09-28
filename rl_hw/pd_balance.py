@@ -908,6 +908,16 @@ def main():
                                 running = True
                             except (OSError, ValueError, KeyError) as err:
                                 ui.set_state(maze_msg=f"maze route not available: {err}")
+                        elif kind == "track_policy":
+                            # swap the ODIL tracking policy without a restart (learn_loop.py: a
+                            # controller restart per round froze the camera, 2026-09-28)
+                            p_ = c.get("path", "")
+                            try:
+                                track_ctrl = TrackPolicy(p_)
+                                os.environ["PD_ODIL_TRACK"] = p_          # recorded with each maze run
+                                print(f"ODIL tracking policy loaded: {p_}")
+                            except (OSError, ValueError, KeyError) as err:
+                                print(f"tracking policy {p_} not loaded: {err}")
                         elif kind == "maze_stop":
                             if maze is not None and maze.active:
                                 maze.end_run("stopped")
