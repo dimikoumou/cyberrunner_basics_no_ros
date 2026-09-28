@@ -545,6 +545,9 @@ def main():
         while time.time() - t0 < timeout:
             env._write_action(level)               # closed-loop level step on the camera angle, every frame
             xr, yr, _, _, found = env._read_state()
+            if env.camera_stale():
+                print("reload: camera frozen -- elevator off")
+                break
             # back = seen ON the board (corners too), not in a hole and not still in the elevator's
             # outlet above the board edge (on the maze board the ball sat in the outlet at y=143 mm
             # and "seen anywhere" stopped the elevator too early)
@@ -698,6 +701,19 @@ def main():
             ep_in_circle = 0
             ep_steps = 0
             for i in range(total_steps - total_taken):
+                if env.camera_stale():
+                    # frozen camera: hold the plate level (motor positions, no camera needed),
+                    # elevator off, nothing else until frames come back
+                    print("CAMERA FROZEN -- plate held level, waiting for frames")
+                    _alert("camera frozen -- rig paused with the plate level; re-plug the camera")
+                    if elevator is not None and elevator.on:
+                        elevator.stop_verified("stopped: camera frozen")
+                    env.hold_session_level()
+                    while env.camera_stale(after_s=0.0) and env._grab_frame() is None:
+                        time.sleep(0.2)
+                    print("camera frames are back -- continuing")
+                    t_prev, move = None, None
+                    obs, _, _, _, info = env.step(np.zeros(2, dtype=np.float32))
                 xb, yb, vx, vy, alpha, beta, gx, gy = obs
                 dt_real_prev = min(time.time() - t_prev, 0.2) if t_prev is not None else 0.034
                 if ui is not None:

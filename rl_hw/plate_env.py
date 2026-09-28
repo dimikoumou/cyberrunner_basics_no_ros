@@ -624,9 +624,15 @@ class HardwarePlateEnv(gym.Env):
         if getattr(self, "_reader_thread", None) is not None:
             # newest frame, waiting (briefly) for one we haven't returned yet
             with self._frame_lock:
-                self._frame_lock.wait_for(lambda: self._latest_seq > self._returned_seq, timeout=0.5)
-                frame = self._latest_frame
+                fresh = self._frame_lock.wait_for(lambda: self._latest_seq > self._returned_seq, timeout=0.5)
+                frame = self._latest_frame if fresh else None
                 self._returned_seq = self._latest_seq
+            # a frozen camera (2026-09-28): the old frame used to be returned again and again --
+            # the controller jolted a ball it only saw in a 78 s old image. No new frame -> None.
+            if fresh:
+                self._stale_since = None
+            elif getattr(self, "_stale_since", None) is None:
+                self._stale_since = time.time()
             ok = frame is not None
         else:
             ok, frame = self.cap.read()
@@ -847,6 +853,17 @@ class HardwarePlateEnv(gym.Env):
             except (OSError, ValueError, KeyError):
                 pass
         return self._cal_tpd.get(dxl_id, abs(tpd))
+
+    def camera_stale(self, after_s=1.0):
+        """True when the camera has delivered no new frame for `after_s` seconds"""
+        t = getattr(self, "_stale_since", None)
+        return t is not None and time.time() - t > after_s
+
+    def hold_session_level(self):
+        """plate to the tracked level motor positions, no camera involved (frozen camera)"""
+        for dxl_id, pos in self._session_level.items():
+            self._cmd_ticks[dxl_id] = pos
+            set_position(self.port_handler, self.packet_handler, dxl_id, pos)
 
     def _level_open_loop(self):
         """plate straight to the fixed level position (LEVEL_TICKS), no camera involved"""
