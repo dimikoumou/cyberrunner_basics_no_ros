@@ -518,8 +518,11 @@ def main():
         while time.time() - t0 < timeout:
             env._write_action(level)               # closed-loop level step on the camera angle, every frame
             xr, yr, _, _, found = env._read_state()
-            # back = seen anywhere on the plate (corners too), just not inside the hole
-            ok = found and near_hole(holes, (xr, yr), extra=-HOLE_MARGIN_M) is None
+            # back = seen ON the board (corners too), not in a hole and not still in the elevator's
+            # outlet above the board edge (on the maze board the ball sat in the outlet at y=143 mm
+            # and "seen anywhere" stopped the elevator too early)
+            ok = (found and near_hole(holes, (xr, yr), extra=-HOLE_MARGIN_M) is None
+                  and abs(xr) < env._x_half + 0.005 and abs(yr) < env._y_half + 0.005)
             seen = seen + 1 if ok else 0
             track_lost(found)
             elevator.poll()
@@ -945,6 +948,12 @@ def main():
                                 maze_join_best, maze_jolts = None, 0          # fresh tries from here
                         line_off = follower.off_line((xb, yb))
                         dj = float(np.hypot(*(join - np.array([xb, yb]))))
+                        if (mode == "maze" and elevator is not None and last_found
+                                and (abs(yb) > env._y_half + 0.005 or abs(xb) > env._x_half + 0.005)):
+                            # the ball is still in the elevator's outlet above the board: push it out
+                            print(f"  maze: ball at ({xb * 1000:.0f}, {yb * 1000:.0f}) mm is off the board (outlet) -> elevator")
+                            reload_ball(RELOAD_TIMEOUT_S)
+                            maze_join_best, maze_join_t = None, time.time()
                         if mode == "maze":
                             # returning to the start: alert once if it has not got closer for 30 s
                             # (a ball stuck on the paper seam sat still for 53 min unnoticed)
