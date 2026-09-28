@@ -298,6 +298,7 @@ class HardwarePlateEnv(gym.Env):
         self._meas_tilt = None          # last plausible measured (alpha, beta) in degrees
         self._stall = {}                # dxl_id -> correction-without-response tracker (see STALL_TICKS)
         self._capped_steps = {}
+        self._capped_angle0 = {}
         self.motor_not_following = None
         self._pose_ok = True
         self._target_hist = []          # recent (alpha, beta) targets, newest last
@@ -764,7 +765,7 @@ class HardwarePlateEnv(gym.Env):
             lo, hi = TICK_BOUNDS[dxl_id]
             lvl = getattr(self, "_session_level", {}).get(dxl_id)
             if lvl is not None:
-                cap = abs(MOTOR_CAP_DEG * tpd)
+                cap = abs(MOTOR_CAP_DEG * self._ticks_per_deg_measured(dxl_id, tpd))
                 lo, hi = max(lo, int(lvl - cap)), min(hi, int(lvl + cap))
             want = self._cmd_ticks.get(dxl_id, (lo + hi) // 2) + delta
             pos = int(np.clip(want, lo, hi))
@@ -772,11 +773,17 @@ class HardwarePlateEnv(gym.Env):
             # ~3 s = the plate is not following it (linkage slipping / loose): report it so the
             # controller stops instead of holding the motor there (2026-09-28)
             if self._pose_ok and pos != want and abs(target_then - meas[i]) > 3.0:
+                if self._capped_steps.get(dxl_id, 0) == 0:
+                    self._capped_angle0[dxl_id] = meas[i]
                 self._capped_steps[dxl_id] = self._capped_steps.get(dxl_id, 0) + 1
             else:
                 self._capped_steps[dxl_id] = 0
+            # only "not following" if the angle also stopped changing while the motor sat at its cap
+            # (a target merely beyond the cap is not a fault)
             if self._capped_steps[dxl_id] > 90:
-                self.motor_not_following = dxl_id
+                if abs(meas[i] - self._capped_angle0.get(dxl_id, meas[i])) < 0.3:
+                    self.motor_not_following = dxl_id
+                self._capped_steps[dxl_id] = 0
             self._cmd_ticks[dxl_id] = pos
             set_position(self.port_handler, self.packet_handler, dxl_id, pos)
         self._tilt_target = target
@@ -817,6 +824,22 @@ class HardwarePlateEnv(gym.Env):
         else:
             print(f"[HardwarePlateEnv] servo leveling did not settle in {max_s:.0f}s "
                   f"(alpha={a:+.2f} beta={b:+.2f}, m1={m1} m3={m3}) -- proceeding anyway")
+
+    def _ticks_per_deg_measured(self, dxl_id, tpd):
+        """ticks per degree from the last self-calibration (calibration.json; the link's response
+        changes when it slips -- motor 3 measured 0.55-0.67 deg per 100 ticks, not 1.0), else nominal"""
+        if getattr(self, "_cal_tpd", None) is None:
+            self._cal_tpd = {}
+            try:
+                with open(os.path.join(os.path.dirname(LAST_LEVEL_CACHE_PATH), "calibration.json")) as f:
+                    mot = json.load(f).get("motors", {})
+                for k, v in mot.items():
+                    g = 0.5 * (v["deg_per_tick_up"] + v["deg_per_tick_down"])
+                    if g > 1e-4:
+                        self._cal_tpd[int(k)] = 1.0 / g
+            except (OSError, ValueError, KeyError):
+                pass
+        return self._cal_tpd.get(dxl_id, abs(tpd))
 
     def _level_open_loop(self):
         """plate straight to the fixed level position (LEVEL_TICKS), no camera involved"""

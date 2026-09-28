@@ -838,6 +838,7 @@ def main():
                             use_policy = use_odil = False
                             ui.set_state(controller="classic")
                             res, warns = calibrate.tilt_calibration(env, _set_position)
+                            env._cal_tpd = None          # re-read the measured ticks per degree
                             if res is None:
                                 cal_msg = "; ".join(warns)
                             else:
