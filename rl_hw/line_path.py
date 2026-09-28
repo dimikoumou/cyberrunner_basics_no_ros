@@ -178,6 +178,10 @@ V_LINE, A_LINE = 0.04, 0.08    # m/s, m/s^2 along the route
 LAG_MAX = 0.025                # reference waits if the ball lags more than this (m)
 
 
+A_LAT = 0.03      # m/s^2: lateral (centripetal) acceleration allowed in bends (~0.3 deg of tilt)
+V_CORNER_MIN = 0.006   # m/s: never plan slower than this (a stopped reference just waits)
+
+
 class PathTracker:
     """Smooth route following (2026-09-26): instead of chasing a point ahead (the
     ball crept along in stick-slip hops at ~5 mm/s), a reference point moves along
@@ -208,6 +212,21 @@ class PathTracker:
         self.K = np.column_stack([np.convolve(k[:, 0], ker, "same"), np.convolve(k[:, 1], ker, "same")])
         self.s = self._project(ball_xy, None) if closed else 0.0
         self.v = 0.0
+        # corner-aware speed profile (2026-09-27, for maze tracing): in a bend of curvature
+        # kappa the speed is limited to sqrt(A_LAT / kappa) (a sharp polyline corner -> near
+        # stop), and a backward pass brakes early enough (a_max) for every bend ahead
+        kap = np.hypot(*self.K.T)
+        vp = np.minimum(self.v_max, np.sqrt(A_LAT / np.maximum(kap, 1e-6)))
+        vp = np.maximum(vp, V_CORNER_MIN)
+        ds = np.diff(self.S)
+        for i in range(len(vp) - 2, -1, -1):
+            vp[i] = min(vp[i], np.sqrt(vp[i + 1] ** 2 + 2 * self.a_max * ds[i]))
+        if closed:                      # the same once more across the wrap-around
+            vp[-1] = min(vp[-1], vp[0])
+            for i in range(len(vp) - 2, -1, -1):
+                vp[i] = min(vp[i], np.sqrt(vp[i + 1] ** 2 + 2 * self.a_max * ds[i]))
+        self.v_prof = vp
+        self.offs = []                  # distance ball <-> line while following (accuracy report)
 
     def _interp(self, arr, s):
         s = s % self.L if self.closed else min(max(s, 0.0), self.L)
@@ -234,7 +253,7 @@ class PathTracker:
         lag = self.s - s_ball
         if self.closed:
             lag = (lag + self.L / 2) % self.L - self.L / 2
-        v_des = self.v_max
+        v_des = min(self.v_max, float(np.interp(self.s % self.L if self.closed else self.s, self.S, self.v_prof)))
         if not self.closed:
             v_des = min(v_des, float(np.sqrt(2 * self.a_max * max(self.L - self.s, 0.0))))
         if lag > LAG_MAX:
@@ -248,5 +267,15 @@ class PathTracker:
         t_hat = t_hat / max(np.hypot(*t_hat), 1e-9)
         a = (dv / max(dt, 1e-3)) * t_hat + self.v ** 2 * self._interp(self.K, self.s)
         finished = (not self.closed) and self.s >= self.L - 1e-4 and self.v < 1e-3
+        off = self.off_line(ball_xy)
+        self.offs.append(off)
         return {"p": self.point(self.s), "v": self.v * t_hat, "a": a, "t_hat": t_hat, "lag": lag,
-                "off": self.off_line(ball_xy), "finished": finished}
+                "off": off, "finished": finished}
+
+    def accuracy(self):
+        """distance ball <-> line while following, in mm: median / p90 / max"""
+        o = np.array(self.offs) * 1000
+        if len(o) == 0:
+            return None
+        return {"median_mm": float(np.median(o)), "p90_mm": float(np.percentile(o, 90)),
+                "max_mm": float(np.max(o)), "n": int(len(o))}

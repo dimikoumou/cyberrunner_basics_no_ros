@@ -540,6 +540,7 @@ def main():
         adopt_goal(h["center"], h["radius"], None, None, h["px"][:2], h["px"][2], "drop test: into the hole")
 
     xb = yb = 0.0
+    draw_what = "path"
     jerk_sum, jerk_n = 0.0, 0
     lost_xy = None
     lost_since, lost_alerted = None, False
@@ -756,6 +757,7 @@ def main():
                                 line_active, line_boost = False, 0.0
                                 goal_polygon = goal_contour_px = goal_px = goal_r_px = None
                                 what = f"'{c['text']}'" if c.get("text") else str(c.get("shape", "circle"))
+                                draw_what = what
                                 line_msg = f"Drawing {what} ({follower.L * 100:.0f} cm)"
                                 pts_px = [plate_to_pixel(env, q) for q in path[::3]]
                                 pts_px = [(q[1], q[0]) for q in pts_px if q is not None]
@@ -875,9 +877,20 @@ def main():
                         env.fixed_goal, env.goal_tolerance = goal, goal_tol
                         if line_ref["finished"]:
                             line_active, line_ref = False, None  # hold at the end with normal balancing
-                            if line_msg != "Reached the end of the line":
-                                line_msg = "Reached the end of the line"
+                            if not line_msg.startswith("Reached the end"):
+                                acc = follower.accuracy()
+                                line_msg = "Reached the end of the line" + (
+                                    f" -- off the line: median {acc['median_mm']:.1f} mm, 90% within "
+                                    f"{acc['p90_mm']:.1f} mm, max {acc['max_mm']:.1f} mm" if acc else "")
                                 print(line_msg)
+                                if acc:
+                                    try:
+                                        with open(os.path.join(os.path.dirname(__file__), "..", "phase3_logs",
+                                                               "draw_accuracy.jsonl"), "a") as f_:
+                                            f_.write(json.dumps({"t": time.time(), "what": draw_what,
+                                                                 "length_m": follower.L, **acc}) + "\n")
+                                    except OSError:
+                                        pass
                                 if ui is not None:
                                     ui.set_state(line_msg=line_msg)
                     edge_x, edge_y = edge_limits(goal, goal_tol, quiet=True)
