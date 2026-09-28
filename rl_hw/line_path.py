@@ -190,7 +190,8 @@ class PathTracker:
     acceleration fed forward (tangential + centripetal on curves) plus rolling
     friction. If the ball falls behind by more than LAG_MAX the reference waits."""
 
-    def __init__(self, path, closed, ball_xy, v=V_LINE, a=A_LINE, keep_direction=False, ref_offset=None):
+    def __init__(self, path, closed, ball_xy, v=V_LINE, a=A_LINE, keep_direction=False, ref_offset=None,
+                 speed_scale=None):
         """keep_direction: follow the path in the given order (drawn paths start at the
         first clicked point); otherwise an open line starts at the end nearer the ball."""
         path = np.asarray(path, dtype=float)
@@ -217,6 +218,9 @@ class PathTracker:
         # stop), and a backward pass brakes early enough (a_max) for every bend ahead
         kap = np.hypot(*self.K.T)
         vp = np.minimum(self.v_max, np.sqrt(A_LAT / np.maximum(kap, 1e-6)))
+        if speed_scale is not None:
+            # learned slow zones (maze practice): per route point factor <= 1
+            vp = vp * np.asarray(speed_scale, dtype=float)[:len(vp)]
         vp = np.maximum(vp, V_CORNER_MIN)
         ds = np.diff(self.S)
         for i in range(len(vp) - 2, -1, -1):

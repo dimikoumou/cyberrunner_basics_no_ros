@@ -38,9 +38,14 @@ class MazePractice:
         self.L = float(r["length_m"])
         self.n = len(self.route)
         self.ilc = {}                                  # controller -> (n, 2) reference offset
+        self.slow = {}                                 # controller -> (n,) speed factor (learned slow zones)
+        self.fail_at = {}                              # controller -> list of route indices where runs failed
         for ctl in ("classic", "odil", "blend"):
             fn = os.path.join(ROOT, "maze", f"ilc_{ctl}.npy")
             self.ilc[ctl] = np.load(fn) if os.path.exists(fn) else np.zeros((self.n, 2))
+            fs = os.path.join(ROOT, "maze", f"slow_{ctl}.npy")
+            self.slow[ctl] = np.load(fs) if os.path.exists(fs) else np.ones(self.n)
+            self.fail_at[ctl] = []
         self.run_no, self.best = 0, {c: 0.0 for c in ("classic", "odil", "blend")}
         self.last = ""
         self.fail_counts = {}
@@ -81,7 +86,7 @@ class MazePractice:
         self.max_idx = 0
         self.t_progress = None
         self.follower = tracker_cls(self.route, False, np.asarray(ball_xy), keep_direction=True, v=MAZE_SPEED,
-                                    ref_offset=self.ilc[ctl])
+                                    ref_offset=self.ilc[ctl], speed_scale=self.slow[ctl])
         self.active = True
         return self.follower
 
@@ -139,6 +144,21 @@ class MazePractice:
             np.save(os.path.join(ROOT, "maze", f"ilc_{self.ctl}.npy"), self.ilc[self.ctl])
         if result != "finished":
             self.fail_counts[result] = self.fail_counts.get(result, 0) + 1
+        # learned slow zones: 3 failures within +-3 % of the route at one spot -> slow the stretch
+        # +-5 % around it (x0.7, down to x0.3 over repeats); e.g. the taped paper at ~65 %
+        if result.startswith(("fell into", "went through")) and self.max_idx > 0:
+            fa = self.fail_at[self.ctl]
+            fa.append(self.max_idx)
+            w3, w5 = int(0.03 * self.n), int(0.05 * self.n)
+            near = [i for i in fa if abs(i - self.max_idx) <= w3]
+            if len(near) >= 3:
+                c = int(np.median(near))
+                lo_, hi_ = max(0, c - w5), min(self.n, c + w5)
+                self.slow[self.ctl][lo_:hi_] = np.maximum(0.3, self.slow[self.ctl][lo_:hi_] * 0.7)
+                self.fail_at[self.ctl] = [i for i in fa if abs(i - c) > w3]
+                np.save(os.path.join(ROOT, "maze", f"slow_{self.ctl}.npy"), self.slow[self.ctl])
+                print(f"  maze: {self.ctl} slows down around {100 * c / self.n:.0f} % of the route "
+                      f"(now x{self.slow[self.ctl][c]:.2f})")
         rec = {"t": time.time(), "run": self.run_no, "controller": self.ctl, "result": result,
                "progress": progress, "duration_s": time.time() - self.t0, "jerk": jerk, **acc}
         os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
