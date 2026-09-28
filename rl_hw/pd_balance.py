@@ -935,7 +935,7 @@ def main():
                         if mode == "maze":
                             # a maze run starts only from REST at the start (a ball arriving at
                             # speed overshot through the wall below the start within 0.1-1 s)
-                            if dj < 0.008 and np.hypot(vx, vy) < 0.01:
+                            if dj < 0.012 and np.hypot(vx, vy) < 0.02:
                                 maze_rest = maze_rest or time.time()
                             else:
                                 maze_rest = None
@@ -1164,6 +1164,8 @@ def main():
                 # stronger one: a stiction pulse must still get through (overriding it
                 # left a ball stuck at the sticky top edge for a whole run).
                 for ax, pos, edge in ((0, xb, edge_x), (1, yb, edge_y)):
+                    if mode == "maze":
+                        break       # the maze start is 12 mm from the plate edge: the guard made it bounce
                     if abs(pos) > edge:
                         push = min(EDGE_PUSH_MAX, EDGE_PUSH_MIN + EDGE_PUSH_GAIN * (abs(pos) - edge))
                         away = -np.sign(pos)
