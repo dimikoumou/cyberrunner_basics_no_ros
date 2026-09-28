@@ -25,6 +25,7 @@ ILC_GAIN = 0.5
 ILC_LEAD_S = 0.15            # the loop reacts ~0.15 s late: correct that much earlier
 ILC_MAX = 0.015              # m, never shift the reference further than this
 MAZE_SPEED = float(os.environ.get("PD_MAZE_SPEED", "0.025"))
+CONTROLLERS = ("classic", "odil", "blend")   # blend = mean of the ODIL and classic line commands
 
 
 class MazePractice:
@@ -36,10 +37,10 @@ class MazePractice:
         self.L = float(r["length_m"])
         self.n = len(self.route)
         self.ilc = {}                                  # controller -> (n, 2) reference offset
-        for ctl in ("classic", "odil"):
+        for ctl in CONTROLLERS:
             fn = os.path.join(ROOT, "maze", f"ilc_{ctl}.npy")
             self.ilc[ctl] = np.load(fn) if os.path.exists(fn) else np.zeros((self.n, 2))
-        self.run_no, self.best = 0, {"classic": 0.0, "odil": 0.0}
+        self.run_no, self.best = 0, {c: 0.0 for c in CONTROLLERS}
         self.last = ""
         self.fail_counts = {}
         self._pixels(env, plate_to_pixel)
@@ -142,8 +143,8 @@ class MazePractice:
     def status(self):
         worst = sorted(self.fail_counts.items(), key=lambda kv: -kv[1])[:2]
         return (f"Maze practice | {self.last or 'starting'} | best: classic {self.best['classic'] * 100:.0f} %, "
-                f"ODIL {self.best['odil'] * 100:.0f} %" + (" | most fails: " + ", ".join(f"{k} x{v}" for k, v in worst)
-                                                            if worst else ""))
+                f"ODIL {self.best['odil'] * 100:.0f} %, ODIL+classic {self.best['blend'] * 100:.0f} %"
+                + (" | most fails: " + ", ".join(f"{k} x{v}" for k, v in worst) if worst else ""))
 
     def overlay(self, fell=None):
         prog = int(np.searchsorted(self.route_px_idx, self.max_idx)) if self.active or self.run_no else 0

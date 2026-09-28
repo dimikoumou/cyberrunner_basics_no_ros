@@ -556,6 +556,8 @@ def main():
     draw_j0 = (0.0, 0)
     tour, tour_t0, cal_msg = [], 0.0, ""
     maze, maze_alt, maze_following, maze_fell = None, False, False, None
+    maze_rest = None
+    maze_blend = False
     jerk_sum, jerk_n = 0.0, 0
     lost_xy = None
     lost_since, lost_alerted = None, False
@@ -858,7 +860,8 @@ def main():
                                     maze = MazePractice(env, plate_to_pixel)
                                 maze_alt = bool(c.get("alternate", True))
                                 first = c.get("controller", "odil")
-                                use_odil, use_policy = first == "odil", False
+                                use_odil, use_policy = first in ("odil", "blend"), False
+                                maze_blend = first == "blend"
                                 mode, live_goal, vias = "maze", False, []
                                 follower = maze.start_run(first, PathTracker, (xb, yb))
                                 line_active, line_boost, move, maze_following, maze_fell = False, 0.0, None, False, None
@@ -927,7 +930,18 @@ def main():
                         # (a normal planned move), then start following
                         join = follower.point(follower.s)
                         line_off = follower.off_line((xb, yb))
-                        if np.hypot(*(join - np.array([xb, yb]))) < LINE_JOIN_M:
+                        dj = float(np.hypot(*(join - np.array([xb, yb]))))
+                        if mode == "maze":
+                            # a maze run starts only from REST at the start (a ball arriving at
+                            # speed overshot through the wall below the start within 0.1-1 s)
+                            if dj < 0.008 and np.hypot(vx, vy) < 0.01:
+                                maze_rest = maze_rest or time.time()
+                            else:
+                                maze_rest = None
+                            ready = maze_rest is not None and time.time() - maze_rest > 0.5
+                        else:
+                            ready = dj < LINE_JOIN_M
+                        if ready:
                             line_active, move = True, None
                         elif goal != (float(join[0]), float(join[1])):
                             goal, goal_tol = (float(join[0]), float(join[1])), LINE_TOL
@@ -976,15 +990,19 @@ def main():
                                 hk = int(result.split()[-1])
                                 maze_fell = maze.holes_px[hk] if hk < len(maze.holes_px) else None
                             maze_following = False
-                            nxt = ("odil" if maze.ctl == "classic" else "classic") if maze_alt else maze.ctl
-                            use_odil, use_policy = nxt == "odil", False
+                            from maze_practice import CONTROLLERS as _MC
+                            nxt = _MC[(_MC.index(maze.ctl) + 1) % len(_MC)] if maze_alt else maze.ctl
+                            use_odil, use_policy = nxt in ("odil", "blend"), False
+                            maze_blend = nxt == "blend"
                             if track_ctrl is not None:
                                 track_ctrl.reset()
                             follower = maze.start_run(nxt, PathTracker, (xb, yb))   # back to the start
+                            maze_rest = None
                             line_active, line_boost, move, line_ref = False, 0.0, None, None
                             draw_j0 = (jerk_sum, jerk_n)
                         if ui is not None:
-                            ui.set_state(maze_msg=maze.status(), controller="odil" if use_odil else "classic")
+                            ui.set_state(maze_msg=maze.status(),
+                                         controller=("odil+classic" if maze_blend else "odil") if use_odil else "classic")
                     edge_x, edge_y = edge_limits(goal, goal_tol, quiet=True)
                     goal_px = goal_r_px = None
                 if ui is not None or (mode == "line" and follower is not None):
@@ -1127,8 +1145,10 @@ def main():
                               + integ + line_boost * th_)
                     action = np.clip(np.asarray(a_line, dtype=np.float32), -0.8, 0.8)
                     if use_odil and track_ctrl is not None:
-                        action = np.clip(np.asarray(track_ctrl(line_ref, pos, vel, dt_real if dt_real > 0 else None),
-                                                    dtype=np.float32), -0.8, 0.8)
+                        a_odil = np.asarray(track_ctrl(line_ref, pos, vel, dt_real if dt_real > 0 else None), dtype=np.float32)
+                        if mode == "maze" and maze_blend:
+                            a_odil = 0.5 * a_odil + 0.5 * np.asarray(a_line, dtype=np.float32)   # ODIL + classic
+                        action = np.clip(a_odil, -0.8, 0.8)
                 elif track_ctrl is not None:
                     track_ctrl.reset()          # fresh observer / integral for the next line
                 # Hard override once near an edge -- full brake straight back toward
