@@ -143,6 +143,7 @@ ANGLE_GUARD_DEG = 7.0
 # the level position found (camera, trusted pose) in THIS session -- a wrong camera reading can
 # then no longer drive a motor to its tick limit.
 MOTOR_CAP_DEG = 8.0
+MOTOR_CAP_TICKS_MAX = 1200    # never more than this from level, whatever the measured response says
 STALL_TICKS = 10 ** 9   # (tick-count stall guard disabled)
 STALL_GAIN_DEG = 0.3
 STALL_RETARGET_DEG = 2.0   # a new command (target moved this much) is a fresh attempt
@@ -765,7 +766,7 @@ class HardwarePlateEnv(gym.Env):
             lo, hi = TICK_BOUNDS[dxl_id]
             lvl = getattr(self, "_session_level", {}).get(dxl_id)
             if lvl is not None:
-                cap = abs(MOTOR_CAP_DEG * self._ticks_per_deg_measured(dxl_id, tpd))
+                cap = min(abs(MOTOR_CAP_DEG * self._ticks_per_deg_measured(dxl_id, tpd)), MOTOR_CAP_TICKS_MAX)
                 lo, hi = max(lo, int(lvl - cap)), min(hi, int(lvl + cap))
             want = self._cmd_ticks.get(dxl_id, (lo + hi) // 2) + delta
             pos = int(np.clip(want, lo, hi))
