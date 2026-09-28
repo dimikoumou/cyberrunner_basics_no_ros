@@ -9,6 +9,9 @@ from masking import mask_hsv
 
 
 # from profileFIle import profile
+BALL_NEAR_CORNER_PX = 22.0   # 640x360 frame: ball centre this close to a plate marker -> marker held
+
+
 class Detector:
     """
     Detector class for identifying corners and a ball in an image using HSV masking
@@ -330,6 +333,15 @@ class Detector:
         corners = np.zeros((4, 2), dtype="float32")
         missing = False
         for i in range(4):
+            # 2026-09-27: a ball right beside a plate marker merges with / pulls the marker
+            # blob, and the whole plate pose (tilt readings of 5-10 deg, ball position) goes
+            # wrong -- the root of several runaways. While the ball (last frame) is that
+            # close, keep this marker at its last good position instead of re-measuring it.
+            if (self.corners is not None and not self.corners_missing and self.ball_pos is not None
+                    and np.all(np.isfinite(self.ball_pos))
+                    and np.hypot(*(np.asarray(self.ball_pos, dtype=float) - self.corners[i, :])) < BALL_NEAR_CORNER_PX):
+                corners[i, :] = self.corners[i, :]
+                continue
             if self.corners is not None and not self.corners_missing:
                 center_pos = self.corners[i, :]
             else:
