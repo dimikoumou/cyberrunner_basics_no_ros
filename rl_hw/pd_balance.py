@@ -928,7 +928,8 @@ def main():
                     if not line_active:
                         # join: bring the ball to the route's current reference point first
                         # (a normal planned move), then start following
-                        join = follower.point(follower.s)
+                        # the maze start is the true route start (not shifted by the learned offset)
+                        join = follower.true_point(follower.s) if mode == "maze" else follower.point(follower.s)
                         line_off = follower.off_line((xb, yb))
                         dj = float(np.hypot(*(join - np.array([xb, yb]))))
                         if mode == "maze":
@@ -1179,9 +1180,12 @@ def main():
                 # _attempt_unstick(), which is the only thing that has ever
                 # actually freed the ball from this specific spot. Let the wedge
                 # detector fire and do its job instead of masking it.
-                if (use_policy or use_odil) and running and mode not in ("line", "path", "maze"):
+                # maze practice: getting to the start and resting there always uses ODIL + classic
+                # settle (user; the best target-holding combination), whatever runs the route
+                maze_join = mode == "maze" and not line_active and odil_ctrl is not None
+                if ((use_policy or use_odil) and running and mode not in ("line", "path", "maze")) or (maze_join and running):
                     handover = max(HANDOVER_MIN, HANDOVER_R_SCALE * goal_tol)
-                    if not hybrid:
+                    if not hybrid and not maze_join:
                         policy_driving = True
                     elif policy_driving and dist_now < handover:
                         policy_driving = False
@@ -1195,7 +1199,7 @@ def main():
                                 ctl.reset()
                         print(f"  hybrid: ball {dist_now * 1000:.0f} mm out -> policy approach")
                     if policy_driving:
-                        if use_odil:
+                        if use_odil or maze_join:
                             action = odil_ctrl.action(goal, (xb, yb), (vx, vy), dt_real if dt_real > 0 else None,
                                                       goal_tol).astype(np.float32)
                         else:
