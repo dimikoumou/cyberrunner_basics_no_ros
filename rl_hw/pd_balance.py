@@ -560,6 +560,7 @@ def main():
     maze_blend = False
     maze_join_best, maze_join_t, maze_join_alerted, maze_jolts = None, 0.0, False, 0
     maze_detour, maze_detoured = None, False
+    relevel_times = []
     jerk_sum, jerk_n = 0.0, 0
     lost_xy = None
     lost_since, lost_alerted = None, False
@@ -1261,15 +1262,26 @@ def main():
                     action = np.zeros(2, dtype=np.float32)
                     phase, kick, move = "idle", np.zeros(2), None
                 if getattr(env, "motor_not_following", None) is not None and running:
-                    _alert(f"motor {env.motor_not_following} turns but the plate does not follow (linkage slipping?) "
-                           f"-- stopped, plate levelled")
-                    if maze is not None and maze.active:
-                        maze.end_run("stopped: motor not following")
-                    running, mode, follower, line_active = False, "click", None, False
+                    # the motor sits at its cap and the angle does not move: the level reference has
+                    # drifted -> re-level on the camera, drop this run, carry on; alert only if it
+                    # keeps happening (3x in 5 min)
+                    mid = env.motor_not_following
                     env.motor_not_following = None
                     env._capped_steps = {}
-                    if ui is not None:
-                        ui.set_state(running=False, mode=mode, maze_msg="STOPPED: a motor turns but the plate does not follow")
+                    relevel_times = [t_ for t_ in relevel_times if time.time() - t_ < 300] + [time.time()]
+                    print(f"  motor {mid} at its cap without the angle moving -> re-levelling ({len(relevel_times)}/3 in 5 min)")
+                    env._servo_level(max_s=6.0)
+                    env._session_level = {k: int(v) for k, v in env._cmd_ticks.items()}
+                    if maze is not None and maze.active and mode == "maze":
+                        maze.end_run("re-levelled")
+                        follower = maze.start_run(maze.ctl, PathTracker, (xb, yb))
+                        line_active, maze_following, maze_rest, move = False, False, None, None
+                    if len(relevel_times) >= 3:
+                        _alert(f"motor {mid}: re-levelled 3 times in 5 min -- paused, plate level")
+                        running, mode, follower, line_active = False, "click", None, False
+                        relevel_times = []
+                        if ui is not None:
+                            ui.set_state(running=False, mode=mode, maze_msg="PAUSED: re-levelled 3 times in 5 min")
                     action = np.zeros(2, dtype=np.float32)
                 prev_applied = np.array(env._last_commanded_action, dtype=float)
                 obs, reward, terminated, truncated, info = env.step(action)

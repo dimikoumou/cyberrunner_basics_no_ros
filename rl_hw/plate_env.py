@@ -770,6 +770,12 @@ class HardwarePlateEnv(gym.Env):
                 lo, hi = max(lo, int(lvl - cap)), min(hi, int(lvl + cap))
             want = self._cmd_ticks.get(dxl_id, (lo + hi) // 2) + delta
             pos = int(np.clip(want, lo, hi))
+            # the level reference follows the drift of the motor-to-plate offset: whenever level
+            # is commanded and the camera sees the plate level, these ticks are (close to) level
+            cur = self._cmd_ticks.get(dxl_id)
+            if (self._pose_ok and cur is not None and lvl is not None
+                    and abs(target[i] - LEVEL_OFFSET_DEG[i]) < 0.4 and abs(meas[i] - LEVEL_OFFSET_DEG[i]) < 0.4):
+                self._session_level[dxl_id] = int(round(0.97 * lvl + 0.03 * cur))
             # a motor held at its cap while the measured angle stays >3 deg off the target for
             # ~3 s = the plate is not following it (linkage slipping / loose): report it so the
             # controller stops instead of holding the motor there (2026-09-28)
