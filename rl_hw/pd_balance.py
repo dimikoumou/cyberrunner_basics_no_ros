@@ -1083,6 +1083,16 @@ def main():
                         elif line_active and last_found:
                             maze_following = True
                             result = maze.step((xb, yb), True)
+                            if maze.retry_req:
+                                # stuck 15 s (real maze): back the reference up 2 cm so the ball rolls
+                                # back and takes the spot again with some speed; fresh jolts
+                                maze.retry_req = False
+                                follower.s, follower.v = max(0.0, follower.s - 0.02), 0.0
+                                run_still_t, run_jolts = None, 0
+                                print(f"  maze: stuck at ({xb * 1000:.0f}, {yb * 1000:.0f}) mm -- retry {maze.retries} "
+                                      f"(back 2 cm, then again)")
+                                if maze.retries == 10:
+                                    _alert(f"maze: ball stuck at x={xb * 1000:.0f} y={yb * 1000:.0f} mm, 10 retries so far")
                         if result:
                             jr = (jerk_sum - draw_j0[0]) / max(1, jerk_n - draw_j0[1])
                             print("maze:", maze.end_run(result, jr))
@@ -1099,6 +1109,7 @@ def main():
                                 track_ctrl.reset()
                             follower = maze.start_run(nxt, PathTracker, (xb, yb))   # back to the start
                             maze_rest = None
+                            run_still_t, run_jolts = None, 0
                             line_active, line_boost, move, line_ref = False, 0.0, None, None
                             draw_j0 = (jerk_sum, jerk_n)
                         if ui is not None:
@@ -1263,20 +1274,19 @@ def main():
                         # real maze (2026-09-28): the ball sat still at a wall end at ~4 deg for the
                         # whole 15 s stall timeout. After 4 s still, tilt back briefly and snap to
                         # full tilt at the reference (user: problem-solve a stuck ball); 3 tries
-                        if np.hypot(*vel) < 0.01 and line_ref["lag"] > 0.005:
-                            run_still_t = run_still_t or t_now
-                            if t_now - run_still_t > 4.0 and run_jolts < 3:
-                                run_jolts += 1
-                                d = line_ref["p"] - pos
-                                d = (d / max(np.hypot(*d), 1e-6)).astype(np.float32)
-                                print(f"  maze: run stalled at ({xb * 1000:.0f}, {yb * 1000:.0f}) mm -- jolt {run_jolts}/3")
-                                env._hold_tilt(-0.4 * d, 0.3)
-                                env._hold_tilt(1.0 * d, 0.6)
-                                run_still_t = time.time()
-                        else:
+                        # still = moved < 3 mm in 4 s (the speed estimate jitters up to ~18 mm/s on a
+                        # resting ball, which kept resetting a speed-based timer)
+                        if run_still_t is None or np.hypot(*(pos - run_still_t[0])) > 0.003:
+                            run_still_t = (pos.copy(), t_now)
+                        elif (t_now - run_still_t[1] > 4.0 and run_jolts < 3
+                              and np.hypot(*(line_ref["p"] - pos)) > 0.004):
+                            run_jolts += 1
+                            d = line_ref["p"] - pos
+                            d = (d / max(np.hypot(*d), 1e-6)).astype(np.float32)
+                            print(f"  maze: run stalled at ({xb * 1000:.0f}, {yb * 1000:.0f}) mm -- jolt {run_jolts}/3")
+                            env._hold_tilt(-0.4 * d, 0.3)
+                            env._hold_tilt(1.0 * d, 0.6)
                             run_still_t = None
-                            if np.hypot(*vel) > 0.02:
-                                run_jolts = 0
                 elif track_ctrl is not None:
                     track_ctrl.reset()          # fresh observer / integral for the next line
                 # Hard override once near an edge -- full brake straight back toward

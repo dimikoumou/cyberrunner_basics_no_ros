@@ -428,7 +428,8 @@ class UIServer:
         for hx, hy, hr, kr in (ov.get("holes_px") or []):
             c = (int(round(hx)), int(round(hy)))
             cv2.circle(img, c, max(2, int(round(hr))), (0, 0, 255), 1, cv2.LINE_AA)       # the hole
-            cv2.circle(img, c, max(3, int(round(kr))), (0, 140, 255), 1, cv2.LINE_AA)     # keep-out zone
+            if st.get("mode") != "maze":     # the maze's real holes: only the hole itself (the keep-out
+                cv2.circle(img, c, max(3, int(round(kr))), (0, 140, 255), 1, cv2.LINE_AA)  # ring misled)
         if ov.get("goal_px") is not None:
             gx, gy = (int(round(v)) for v in ov["goal_px"])
             if ov.get("goal_r_px"):

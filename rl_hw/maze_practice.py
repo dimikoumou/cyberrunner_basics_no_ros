@@ -90,6 +90,7 @@ class MazePractice:
         self.samples = []                              # (route index, ball xy)
         self.max_idx = 0
         self.t_progress = None
+        self.retries, self.retry_req = 0, False
         self.follower = tracker_cls(self.route, False, np.asarray(ball_xy), keep_direction=True, v=MAZE_SPEED,
                                     ref_offset=self.ilc[ctl] if LEARN else None,
                                     speed_scale=self.slow[ctl] if LEARN else None,
@@ -110,6 +111,13 @@ class MazePractice:
             self.t_progress = now
         self.max_idx = max(self.max_idx, idx)
         if now - self.t_progress > STALL_S:
+            if REAL:
+                # real maze (user, 2026-09-28): never drive all the way back to the start -- keep
+                # trying from here (it may find a way, or fall into a hole -> elevator -> start)
+                self.t_progress = now
+                self.retries += 1
+                self.retry_req = True
+                return None
             return "stuck (no progress for 15 s)"
         if REAL:
             return None
@@ -170,7 +178,7 @@ class MazePractice:
                       f"(now x{self.slow[self.ctl][c]:.2f})")
         rec = {"t": time.time(), "run": self.run_no, "controller": self.ctl, "learn": LEARN, "real": REAL,
                "policy": os.environ.get("PD_ODIL_TRACK", "default"), "result": result,
-               "progress": progress, "duration_s": time.time() - self.t0, "jerk": jerk, **acc}
+               "progress": progress, "retries": getattr(self, "retries", 0), "duration_s": time.time() - self.t0, "jerk": jerk, **acc}
         os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
         with open(LOG_PATH, "a") as f:
             f.write(json.dumps(rec) + "\n")
