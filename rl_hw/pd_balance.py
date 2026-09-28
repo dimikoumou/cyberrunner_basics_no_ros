@@ -33,7 +33,7 @@ from goal_circle import plate_to_pixel  # noqa: E402
 from goal_circle import (detect_goal_circle, detect_on_frame, save_debug, save_last_goal,  # noqa: E402
                          pixel_to_plate, inside_region)
 from ui_server import UIServer, FRAME_W, FRAME_H  # noqa: E402
-from line_path import detect_line, PathTracker  # noqa: E402
+from line_path import detect_line, PathTracker, V_LINE  # noqa: E402
 import shapes  # noqa: E402
 import calibrate  # noqa: E402
 from plate_env import set_position as _set_position  # noqa: E402
@@ -756,11 +756,12 @@ def main():
                                     routed += list(detour(holes, p0, p1)) + [p1]
                                 path = shapes.resample(routed)
                                 mode, live_goal = "path", False
-                                follower = PathTracker(path, False, np.array([xb, yb]), keep_direction=True)
+                                follower = PathTracker(path, False, np.array([xb, yb]), keep_direction=True,
+                                                       v=float(c.get("speed", V_LINE)))
                                 line_active, line_boost = False, 0.0
                                 goal_polygon = goal_contour_px = goal_px = goal_r_px = None
                                 what = f"'{c['text']}'" if c.get("text") else str(c.get("shape", "circle"))
-                                draw_what = what
+                                draw_what = f"{what} @ {float(c.get('speed', V_LINE)) * 1000:.0f} mm/s"
                                 line_msg = f"Drawing {what} ({follower.L * 100:.0f} cm)"
                                 pts_px = [plate_to_pixel(env, q) for q in path[::3]]
                                 pts_px = [(q[1], q[0]) for q in pts_px if q is not None]

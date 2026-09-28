@@ -283,6 +283,17 @@ target (mean ± 95 % CI); jerk = median per trip.
 (and more consistently: the narrowest interval), and moves the plate **~2.5x more smoothly**
 than every other setup. RL + settle is the fastest. (One ODIL trip excluded: ball lost.)
 
+### Rig-fitted ODIL (v11) and drawing accuracy
+- **System identification from ~30 min of rig logs** (`rl_sim/sysid_rig.py`): command -> plate angle =
+  1-2 frames of pure delay + a 90-100 ms lag; tilt -> acceleration 0.113 m/s^2 per deg (as assumed);
+  rolling friction 0.042 m/s^2 (70 % above the assumed 0.025).
+- **ODIL v11** = v6 trained with these values. Rig, pure ODIL: v6 (29 trips) 0.68 ± 0.05 inside,
+  9.2 mm, jerk 0.0039 -> **v11 (20 trips) 0.73 ± 0.07 inside, 7.8 mm, jerk 0.0036**; now the default.
+- **Drawing (maze feasibility), classic path follower with corner braking:** circle at 4 / 2 /
+  1.2 cm/s -> median 9.4 / 8.6 / 4.3 mm off the line, 90 % within 17.6 / 15.7 / 17.9 mm; square
+  and star similar. Slower lowers the median but not the tail (stick-slip hops). Not yet maze-ready;
+  next: ODIL trained to follow a moving reference, and routes that use the walls.
+
 ## 9. Recommended next steps
 
 1. **Pure ODIL near-field precision** (10.8 mm vs ~6 mm for the hybrids): v10 (4-stage delay,
