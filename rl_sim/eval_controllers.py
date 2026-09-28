@@ -69,8 +69,10 @@ class ODILController:
         if self.n_in >= 10:
             self.z += (rel / self.z_scale - self.z / self.tz) * DT
             feat = np.concatenate([feat, self.z])
-        if self.n_in == 11:
+        if self.n_in >= 11:
             feat = np.concatenate([feat, [obs[8]]])            # target radius / 0.03 (build_obs)
+        if self.n_in == 14:                                     # v12: hole features (set by the caller)
+            feat = np.concatenate([feat, getattr(self, "_extra", np.zeros(3))])
         u_deg = 5.0 * 0.8 * np.tanh(self.net(feat))
         return np.clip(u_deg / 5.0 / ACTION_SCALE, -1, 1)   # env multiplies by ACTION_SCALE
 

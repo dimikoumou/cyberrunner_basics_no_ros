@@ -131,7 +131,9 @@ def f(x, u, goal, k_acc, a_static, bias, taus):
 HOLE_W = float(os.environ.get("ODIL_HOLE_W", "50.0"))
 HOLE_R_RANGE = (0.006, 0.010)
 HOLE_MARGIN = 0.008
-NO_HOLE_FRAC = 0.2
+NO_HOLE_FRAC = float(os.environ.get("ODIL_NO_HOLE_FRAC", "0.2"))
+ON_LINE_FRAC = float(os.environ.get("ODIL_ON_LINE_FRAC", "0.7"))
+HOLE_PHYS_W = float(os.environ.get("ODIL_HOLE_PHYS_W", "1.0"))   # extra weight on the physics of hole trajectories
 
 
 def hole_features(p, hole, rk):
@@ -181,7 +183,7 @@ def build(rng, m):
     nrm /= np.maximum(np.linalg.norm(nrm, axis=1, keepdims=True), 1e-9)
     on_line = s + tl[:, None] * (g - s) + nrm * rng.uniform(-1.0, 1.0, (m, 1)) * RKn[:, None]
     rand_h = np.column_stack([rng.uniform(-GOAL_X, GOAL_X, m), rng.uniform(-GOAL_Y, GOAL_Y, m)])
-    H = np.where((rng.random(m) < 0.7)[:, None], on_line, rand_h)
+    H = np.where((rng.random(m) < ON_LINE_FRAC)[:, None], on_line, rand_h)
     clear = (np.hypot(*(H - s).T) > RKn + 0.012) & (np.hypot(*(H - g).T) > RKn + R + 0.012)
     none = (rng.random(m) < NO_HOLE_FRAC) | ~clear | near
     RKn = np.where(none, 0.0, RKn)
@@ -246,7 +248,9 @@ def main():
             gx = goal.expand(-1, N_PTS - 1, -1)
             u = pol(xm, gx, B["R"], B["hole"], B["rk"])
             res = (x[:, 1:] - x[:, :-1] - f(xm, u, gx, B["k"], B["s"], B["b"], B["taus"]) * dt) / SCALE
-            phys = (res ** 2).sum(-1).sum(-1).mean()
+            w_phys = torch.where(B["rk"][:, 0, 0] > 0, torch.full_like(B["rk"][:, 0, 0], HOLE_PHYS_W),
+                                 torch.ones_like(B["rk"][:, 0, 0]))
+            phys = ((res ** 2).sum(-1).sum(-1) * w_phys).mean()
             smooth = ((u[:, 1:] - u[:, :-1]) / U_MAX_DEG).pow(2).sum(-1).sum(-1).mean()
             # the end state must be a true rest: the policy's command there = the held tilt,
             # and every tilt stage / the observer agree with it
