@@ -21,9 +21,9 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 ROUTE_PATH = os.path.join(ROOT, "maze", "route.json")
 LOG_PATH = os.path.join(ROOT, "phase3_logs", "maze_runs.jsonl")
 WALL_TOL = 0.0015            # m: inside a wall outline by more than this = crossed it
-ILC_GAIN = 0.5
+ILC_GAIN = 0.2              # 0.5 overcorrected: ODIL went from 21-65 % to failing at 4 % every run
 ILC_LEAD_S = 0.15            # the loop reacts ~0.15 s late: correct that much earlier
-ILC_MAX = 0.015              # m, never shift the reference further than this
+ILC_MAX = 0.008              # m, never shift the reference further than this (15 mm let it drift into walls)
 MAZE_SPEED = float(os.environ.get("PD_MAZE_SPEED", "0.025"))
 STALL_S = 15.0               # no progress along the route for this long -> the run counts as stuck
 CONTROLLERS = tuple(os.environ.get("PD_MAZE_CONTROLLERS", "odil,blend").split(","))   # blend = mean of ODIL and classic (classic alone dropped: stuck at ~8 %)
