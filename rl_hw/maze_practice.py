@@ -25,7 +25,8 @@ ILC_GAIN = 0.2              # 0.5 overcorrected: ODIL went from 21-65 % to faili
 ILC_LEAD_S = 0.15            # the loop reacts ~0.15 s late: correct that much earlier
 ILC_MAX = 0.008              # m, never shift the reference further than this (15 mm let it drift into walls)
 MAZE_SPEED = float(os.environ.get("PD_MAZE_SPEED", "0.025"))
-STALL_S = 15.0               # no progress along the route for this long -> the run counts as stuck
+STALL_S = 15.0
+LEARN = os.environ.get("PD_MAZE_LEARN", "1") == "1"   # 0: no ILC / slow zones (diagnostic baseline)               # no progress along the route for this long -> the run counts as stuck
 CONTROLLERS = tuple(os.environ.get("PD_MAZE_CONTROLLERS", "odil,blend").split(","))   # blend = mean of ODIL and classic (classic alone dropped: stuck at ~8 %)
 
 
@@ -86,7 +87,8 @@ class MazePractice:
         self.max_idx = 0
         self.t_progress = None
         self.follower = tracker_cls(self.route, False, np.asarray(ball_xy), keep_direction=True, v=MAZE_SPEED,
-                                    ref_offset=self.ilc[ctl], speed_scale=self.slow[ctl])
+                                    ref_offset=self.ilc[ctl] if LEARN else None,
+                                    speed_scale=self.slow[ctl] if LEARN else None)
         self.active = True
         return self.follower
 
@@ -122,7 +124,7 @@ class MazePractice:
         self.best[self.ctl] = max(self.best[self.ctl], progress)
         acc = self.follower.accuracy() or {}
         # ILC: mean lateral error per route point over this run, lead-shifted and smoothed
-        if len(self.samples) > 20:
+        if LEARN and len(self.samples) > 20:
             err = np.zeros((self.n, 2))
             cnt = np.zeros(self.n)
             T = self.follower.T[:self.n]
@@ -146,7 +148,7 @@ class MazePractice:
             self.fail_counts[result] = self.fail_counts.get(result, 0) + 1
         # learned slow zones: 3 failures within +-3 % of the route at one spot -> slow the stretch
         # +-5 % around it (x0.7, down to x0.3 over repeats); e.g. the taped paper at ~65 %
-        if result.startswith(("fell into", "went through")) and self.max_idx > 0:
+        if LEARN and result.startswith(("fell into", "went through")) and self.max_idx > 0:
             fa = self.fail_at[self.ctl]
             fa.append(self.max_idx)
             w3, w5 = int(0.03 * self.n), int(0.05 * self.n)
@@ -159,7 +161,7 @@ class MazePractice:
                 np.save(os.path.join(ROOT, "maze", f"slow_{self.ctl}.npy"), self.slow[self.ctl])
                 print(f"  maze: {self.ctl} slows down around {100 * c / self.n:.0f} % of the route "
                       f"(now x{self.slow[self.ctl][c]:.2f})")
-        rec = {"t": time.time(), "run": self.run_no, "controller": self.ctl, "result": result,
+        rec = {"t": time.time(), "run": self.run_no, "controller": self.ctl, "learn": LEARN, "result": result,
                "progress": progress, "duration_s": time.time() - self.t0, "jerk": jerk, **acc}
         os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
         with open(LOG_PATH, "a") as f:
