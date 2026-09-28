@@ -590,6 +590,7 @@ def main():
     maze_blend = False
     maze_join_best, maze_join_t, maze_join_alerted, maze_jolts = None, 0.0, False, 0
     maze_back_wp = None                       # real maze: next waypoint back along the route
+    run_jolt_at = None
     run_still_t, run_jolts = None, 0          # ball stopped mid-run (real maze): jolt it free
     maze_detour, maze_detoured = None, False
     relevel_times = []
@@ -1278,8 +1279,12 @@ def main():
                         # resting ball, which kept resetting a speed-based timer)
                         if run_still_t is None or np.hypot(*(pos - run_still_t[0])) > 0.003:
                             run_still_t = (pos.copy(), t_now)
-                        elif (t_now - run_still_t[1] > 4.0 and run_jolts < 3
-                              and np.hypot(*(line_ref["p"] - pos)) > 0.004):
+                        elif (t_now - run_still_t[1] > 4.0
+                              and np.hypot(*(line_ref["p"] - pos)) > 0.004
+                              and (run_jolts < 3 or run_jolt_at is None or np.hypot(*(pos - run_jolt_at)) > 0.02)):
+                            if run_jolt_at is None or np.hypot(*(pos - run_jolt_at)) > 0.02:
+                                run_jolts = 0               # a new spot: fresh tries
+                            run_jolt_at = pos.copy()
                             run_jolts += 1
                             d = line_ref["p"] - pos
                             d = (d / max(np.hypot(*d), 1e-6)).astype(np.float32)
