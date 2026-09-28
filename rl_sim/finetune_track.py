@@ -28,7 +28,15 @@ import odil_track as ot  # noqa: E402
 torch.set_num_threads(int(os.environ.get("FT_THREADS", "6")))
 DT, SUB = 1.0 / 29.0, 4
 B, STEPS = int(os.environ.get("FT_BATCH", "96")), int(os.environ.get("FT_STEPS", "120"))   # 120 steps ~ 4 s
-A_ROLL, EPS_V, V_STRIB = 0.042, 0.004, 0.01
+A_ROLL = float(os.environ.get("FT_A_ROLL", "0.042"))
+EPS_V, V_STRIB = 0.004, 0.01
+K_RANGE = tuple(float(v) for v in os.environ.get("FT_K_RANGE", "0.100,0.125").split(","))
+DELAY_RANGE = tuple(int(v) for v in os.environ.get("FT_DELAY_RANGE", "1,3").split(","))    # control steps
+TAU_RANGE = tuple(float(v) for v in os.environ.get("FT_TAU_RANGE", "0.06,0.11").split(","))
+# route-specific refinement (maze practice): references are windows of the real route, and
+# the loss adds penalties for coming near a hole or a wall of the virtual maze
+ROUTE = os.environ.get("FT_ROUTE")
+HOLE_W, WALL_W, CLEAR = float(os.environ.get("FT_HOLE_W", "30")), float(os.environ.get("FT_WALL_W", "30")), 0.004
 POS_NOISE = 0.0004
 JERK_W = float(os.environ.get("FT_JERK_W", "20"))   # smoothness weight (ft1: 20 -> accurate but jerky on the rig)
 # "the board swerved" (user): penalise tilt BEYOND what the line needs -- the reference's own
@@ -61,25 +69,25 @@ def rollout(pol, P, V, A, rng, train=True):
     """closed-loop rollout on references (B, STEPS+1, 2) -> tracking errors (B, STEPS)"""
     b = P.shape[0]
     t = lambda a: torch.tensor(a, dtype=torch.float32)
-    k_acc = t(rng.uniform(0.100, 0.125, (b, 1)))
+    k_acc = t(rng.uniform(*K_RANGE, (b, 1)))
     a_st = k_acc * t(rng.uniform(1.2, 2.6, (b, 1)))
     bd = rng.normal(0, 1, (b, 2))
     bias = t(bd / np.linalg.norm(bd, axis=1, keepdims=True) * rng.uniform(0, 0.8, (b, 1)))
-    dly = torch.tensor(rng.integers(1, 4, b))           # pure delay, control steps
+    dly = torch.tensor(rng.integers(DELAY_RANGE[0], DELAY_RANGE[1] + 1, b))   # pure delay, control steps
     ar = torch.arange(b)
-    tau = t(rng.uniform(0.06, 0.11, (b, 1)))
+    tau = t(rng.uniform(*TAU_RANGE, (b, 1)))
     # start: behind / off the reference, 40 % at rest
     that = V[:, 0] / torch.clamp(V[:, 0].norm(dim=-1, keepdim=True), min=1e-6)
     p = P[:, 0] - that * t(rng.uniform(0, 0.02, (b, 1))) + t(rng.normal(0, 0.005, (b, 2)))
     v = torch.where(t(rng.random((b, 1)) < 0.4) > 0, torch.zeros(b, 2), V[:, 0] * t(rng.uniform(0.3, 1.2, (b, 1))))
     tilt = A[:, 0] / k_acc
     o1, o2, z = tilt.clone(), tilt.clone(), torch.zeros(b, 2)
-    ubuf = [tilt.clone() for _ in range(4)]             # commands on their way to the plate
+    ubuf = [tilt.clone() for _ in range(DELAY_RANGE[1] + 1)]   # commands on their way to the plate
     applied = tilt / 5.0
     meas_prev = p.clone()
     p_seen, v_seen = p.clone(), v.clone()
     pend_p, pend_v = p.clone(), v.clone()
-    errs, jerk, effort = [], [], []
+    errs, jerk, effort, obst = [], [], [], []
     for n in range(STEPS):
         e = P[:, n] - p_seen
         z = z + (e / ot.Z_SCALE - z / ot.TZ) * DT
@@ -109,17 +117,72 @@ def rollout(pol, P, V, A, rng, train=True):
             v = v + acc * h
             p = p + v * h
         errs.append((p - P[:, n + 1]).norm(dim=-1))
+        if OBST is not None:
+            hc, hr, wp = OBST
+            dh = torch.cdist(p, hc) - hr[None, :]                       # to each hole's edge
+            dw = torch.cdist(p, wp).min(dim=-1).values                  # to the nearest wall point
+            obst.append(HOLE_W * (torch.relu(CLEAR - dh) / 0.004).pow(2).sum(-1)
+                        + WALL_W * (torch.relu(CLEAR - dw) / 0.004).pow(2))
         # camera: noisy, one frame late (the policy acts on the previous frame's measurement);
         # velocity = finite difference of the noisy positions
         meas = p + (t(rng.normal(0, POS_NOISE, (b, 2))) if train else 0.0)
         p_seen, v_seen = pend_p, pend_v
         pend_p, pend_v = meas, (meas - meas_prev) / DT
         meas_prev = meas
-    return torch.stack(errs, 1), torch.stack(jerk, 1), torch.stack(effort, 1)
+    ob = torch.stack(obst, 1) if obst else torch.zeros(b, STEPS)
+    return torch.stack(errs, 1), torch.stack(jerk, 1), torch.stack(effort, 1), ob
+
+
+OBST = None
+_ROUTE_REF = None
+
+
+def _load_route():
+    """the whole maze route as a reference trajectory (p, v, a every DT, the rig's path follower
+    at the maze speed) + holes and wall sample points as tensors"""
+    global OBST, _ROUTE_REF
+    import json as _j
+    import types as _t
+    sys.path.insert(0, os.path.join(HERE, "..", "rl_hw"))
+    sys.modules.setdefault("cv2", _t.ModuleType("cv2"))
+    gc = _t.ModuleType("goal_circle")
+    gc.red_mask = gc.pixel_to_plate = None
+    sys.modules.setdefault("goal_circle", gc)
+    from line_path import PathTracker
+    r = _j.load(open(ROUTE))
+    route = np.array(r["route_m"])
+    tr = PathTracker(route, False, route[0], keep_direction=True, v=float(os.environ.get("FT_SPEED", "0.025")))
+    Ps, Vs, As = [], [], []
+    for _ in range(20000):
+        ref = tr.update(tr.point(tr.s), DT)
+        Ps.append(ref["p"]); Vs.append(ref["v"]); As.append(ref["a"])
+        if ref["finished"]:
+            break
+    _ROUTE_REF = (np.array(Ps), np.array(Vs), np.array(As))
+    hc = torch.tensor([h["center"] for h in r["holes"]], dtype=torch.float32)
+    hr = torch.tensor([h["radius"] for h in r["holes"]], dtype=torch.float32)
+    wp = []
+    for w in r.get("walls_m", []):
+        w = np.array(w + [w[0]])
+        for a_, b_ in zip(w[:-1], w[1:]):
+            n_ = max(1, int(np.hypot(*(b_ - a_)) / 0.002))
+            wp += [a_ + (b_ - a_) * k / n_ for k in range(n_)]
+    OBST = (hc, hr, torch.tensor(np.array(wp), dtype=torch.float32))
+    print(f"route reference: {len(Ps)} steps ({len(Ps) * DT:.0f} s), {len(hc)} holes, {len(wp)} wall points")
+
+
+def route_refs(rng, m):
+    """m windows of the route reference, starting anywhere along it"""
+    P_, V_, A_ = _ROUTE_REF
+    idx = rng.integers(0, len(P_) - STEPS - 1, m)
+    sl = lambda X: np.stack([X[i:i + STEPS + 1] for i in idx])
+    return sl(P_), sl(V_), sl(A_)
 
 
 def main():
     init, name = sys.argv[1], sys.argv[2]
+    if ROUTE:
+        _load_route()
     iters = int(sys.argv[3]) if len(sys.argv) > 3 else 1500
     out = os.path.join(HERE, "runs", name)
     os.makedirs(out, exist_ok=True)
@@ -127,22 +190,24 @@ def main():
     pol = Pol(init)
     opt = torch.optim.Adam(pol.parameters(), lr=float(os.environ.get("FT_LR", "3e-4")))
     t0, hist = time.time(), []
-    Pv, Vv, Av = (torch.tensor(a, dtype=torch.float32) for a in ot._references(np.random.default_rng(99), 64, STEPS + 1, STEPS * DT))
+    refs = route_refs if ROUTE else (lambda r, m: ot._references(r, m, STEPS + 1, STEPS * DT))
+    Pv, Vv, Av = (torch.tensor(a, dtype=torch.float32) for a in refs(np.random.default_rng(99), 64))
     for it in range(iters):
         if it % 25 == 0:      # fresh references every 25 iterations
-            P, V, A = (torch.tensor(a, dtype=torch.float32) for a in ot._references(rng, B, STEPS + 1, STEPS * DT))
-        err, jerk, eff = rollout(pol, P, V, A, rng)
-        loss = ((err / 0.005) ** 2).mean() + JERK_W * jerk.mean() + EFFORT_W * eff.mean()
+            P, V, A = (torch.tensor(a, dtype=torch.float32) for a in refs(rng, B))
+        err, jerk, eff, ob = rollout(pol, P, V, A, rng)
+        loss = ((err / 0.005) ** 2).mean() + JERK_W * jerk.mean() + EFFORT_W * eff.mean() + ob.mean()
         opt.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(pol.parameters(), 1.0)
         opt.step()
         if it % 100 == 0 or it == iters - 1:
             with torch.no_grad():
-                ev, jv, efv = rollout(pol, Pv, Vv, Av, np.random.default_rng(123), train=False)
+                ev, jv, efv, obv = rollout(pol, Pv, Vv, Av, np.random.default_rng(123), train=False)
             e = ev.flatten().numpy() * 1000
             rec = dict(it=it, median_mm=float(np.median(e)), p90_mm=float(np.percentile(e, 90)),
                        max_mm=float(e.max()), jerk=float(jv.mean()), extra_tilt=float(efv.mean()),
+                       obstacle=float(obv.mean()),
                        minutes=(time.time() - t0) / 60)
             hist.append(rec)
             print(rec, flush=True)
