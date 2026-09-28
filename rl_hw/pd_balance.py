@@ -558,7 +558,7 @@ def main():
     maze, maze_alt, maze_following, maze_fell = None, False, False, None
     maze_rest = None
     maze_blend = False
-    maze_join_best, maze_join_t, maze_join_alerted = None, 0.0, False
+    maze_join_best, maze_join_t, maze_join_alerted, maze_jolts = None, 0.0, False, 0
     jerk_sum, jerk_n = 0.0, 0
     lost_xy = None
     lost_since, lost_alerted = None, False
@@ -937,11 +937,23 @@ def main():
                             # returning to the start: alert once if it has not got closer for 30 s
                             # (a ball stuck on the paper seam sat still for 53 min unnoticed)
                             if maze_join_best is None or dj < maze_join_best - 0.01:
-                                maze_join_best, maze_join_t = dj, time.time()
+                                maze_join_best, maze_join_t, maze_jolts = dj, time.time(), 0
+                            elif time.time() - maze_join_t > 30 and maze_jolts < 3:
+                                # stuck (paper seam): rock it over -- tilt back 0.5 s so it rolls
+                                # away from the edge, then snap to full tilt towards the start
+                                # (user: "just jolt"); up to 3 tries, then alert
+                                maze_jolts += 1
+                                d = np.array(join) - np.array([xb, yb])
+                                d = d / max(np.hypot(*d), 1e-6)
+                                print(f"  maze: stuck at ({xb * 1000:.0f}, {yb * 1000:.0f}) mm -- jolt {maze_jolts}/3")
+                                env._hold_tilt((-0.5 * d).astype(np.float32), 0.5)
+                                env._hold_tilt((1.0 * d).astype(np.float32), 1.0)
+                                maze_join_t = time.time() - 20          # next try after 10 s
+                                move, move_request = None, True
                             elif time.time() - maze_join_t > 30 and not maze_join_alerted:
                                 maze_join_alerted = True
                                 _alert(f"maze: ball not getting back to the start (stuck at x={xb * 1000:.0f} "
-                                       f"y={yb * 1000:.0f} mm for 30 s) -- paper seam?")
+                                       f"y={yb * 1000:.0f} mm, 3 jolts did not free it) -- paper seam?")
                             # a maze run starts only from REST at the start (a ball arriving at
                             # speed overshot through the wall below the start within 0.1-1 s)
                             if dj < 0.012 and np.hypot(vx, vy) < 0.02:
