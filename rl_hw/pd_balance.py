@@ -559,6 +559,7 @@ def main():
     maze_rest = None
     maze_blend = False
     maze_join_best, maze_join_t, maze_join_alerted, maze_jolts = None, 0.0, False, 0
+    maze_detour, maze_detoured = None, False
     jerk_sum, jerk_n = 0.0, 0
     lost_xy = None
     lost_since, lost_alerted = None, False
@@ -931,6 +932,15 @@ def main():
                         # (a normal planned move), then start following
                         # the maze start is the true route start (not shifted by the learned offset)
                         join = follower.true_point(follower.s) if mode == "maze" else follower.point(follower.s)
+                        join_goal = join
+                        if mode == "maze" and maze_detour is not None:
+                            # escape: first to a point away from the edge, then to the start
+                            join_goal = maze_detour
+                            if np.hypot(*(maze_detour - np.array([xb, yb]))) < 0.015:
+                                print("  maze: detour point reached -> back to the start")
+                                maze_detour = None
+                                join_goal = join
+                                maze_join_best, maze_jolts = None, 0          # fresh tries from here
                         line_off = follower.off_line((xb, yb))
                         dj = float(np.hypot(*(join - np.array([xb, yb]))))
                         if mode == "maze":
@@ -950,6 +960,13 @@ def main():
                                 env._hold_tilt((1.0 * d).astype(np.float32), 1.0)
                                 maze_join_t = time.time() - 20          # next try after 10 s
                                 move, move_request = None, True
+                            elif time.time() - maze_join_t > 30 and maze_detour is None and not maze_detoured:
+                                # jolts did not help: go 4 cm towards the plate centre first
+                                b_ = np.array([xb, yb])
+                                maze_detour = b_ - 0.04 * b_ / max(np.hypot(*b_), 1e-6)
+                                maze_detoured = True
+                                maze_join_t = time.time()
+                                print(f"  maze: detour via ({maze_detour[0] * 1000:.0f}, {maze_detour[1] * 1000:.0f}) mm")
                             elif time.time() - maze_join_t > 30 and not maze_join_alerted:
                                 maze_join_alerted = True
                                 _alert(f"maze: ball not getting back to the start (stuck at x={xb * 1000:.0f} "
@@ -966,8 +983,9 @@ def main():
                         if ready:
                             line_active, move = True, None
                             maze_join_best, maze_join_alerted = None, False
-                        elif goal != (float(join[0]), float(join[1])):
-                            goal, goal_tol = (float(join[0]), float(join[1])), LINE_TOL
+                            maze_detour, maze_detoured = None, False
+                        elif goal != (float(join_goal[0]), float(join_goal[1])):
+                            goal, goal_tol = (float(join_goal[0]), float(join_goal[1])), LINE_TOL
                             env.goal = np.array(goal, dtype=np.float32)
                             env.fixed_goal, env.goal_tolerance = goal, goal_tol
                             move_request = True
