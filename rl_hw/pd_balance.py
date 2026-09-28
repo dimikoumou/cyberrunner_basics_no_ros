@@ -558,6 +558,7 @@ def main():
     maze, maze_alt, maze_following, maze_fell = None, False, False, None
     maze_rest = None
     maze_blend = False
+    maze_join_best, maze_join_t, maze_join_alerted = None, 0.0, False
     jerk_sum, jerk_n = 0.0, 0
     lost_xy = None
     lost_since, lost_alerted = None, False
@@ -933,6 +934,14 @@ def main():
                         line_off = follower.off_line((xb, yb))
                         dj = float(np.hypot(*(join - np.array([xb, yb]))))
                         if mode == "maze":
+                            # returning to the start: alert once if it has not got closer for 30 s
+                            # (a ball stuck on the paper seam sat still for 53 min unnoticed)
+                            if maze_join_best is None or dj < maze_join_best - 0.01:
+                                maze_join_best, maze_join_t = dj, time.time()
+                            elif time.time() - maze_join_t > 30 and not maze_join_alerted:
+                                maze_join_alerted = True
+                                _alert(f"maze: ball not getting back to the start (stuck at x={xb * 1000:.0f} "
+                                       f"y={yb * 1000:.0f} mm for 30 s) -- paper seam?")
                             # a maze run starts only from REST at the start (a ball arriving at
                             # speed overshot through the wall below the start within 0.1-1 s)
                             if dj < 0.012 and np.hypot(vx, vy) < 0.02:
@@ -944,6 +953,7 @@ def main():
                             ready = dj < LINE_JOIN_M
                         if ready:
                             line_active, move = True, None
+                            maze_join_best, maze_join_alerted = None, False
                         elif goal != (float(join[0]), float(join[1])):
                             goal, goal_tol = (float(join[0]), float(join[1])), LINE_TOL
                             env.goal = np.array(goal, dtype=np.float32)
