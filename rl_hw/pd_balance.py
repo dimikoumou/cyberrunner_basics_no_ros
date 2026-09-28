@@ -539,7 +539,6 @@ def main():
         else:
             elevator.start()
         started = True
-        outlet_t, rocks = None, 0
         print(f"ball lost -- running the elevator at {elevator.units} units until it is back")
         env._servo_level(max_s=3.0)            # level on the camera-measured angle
         level = np.zeros(2, dtype=np.float32)
@@ -552,20 +551,6 @@ def main():
             ok = (found and near_hole(holes, (xr, yr), extra=-HOLE_MARGIN_M) is None
                   and abs(xr) < env._x_half + 0.005 and abs(yr) < env._y_half + 0.005)
             seen = seen + 1 if ok else 0
-            # stuck in the outlet just off the board edge (real maze, 2026-09-28: two 60 s reloads
-            # failed with the ball sitting there): rock it in -- dip that edge 0.4 s so the board
-            # drops below the outlet lip, then tilt the other way so it rolls onto the board
-            off = found and not ok and (abs(yr) > env._y_half + 0.005 or abs(xr) > env._x_half + 0.005)
-            outlet_t = (outlet_t or time.time()) if off else None
-            if off and time.time() - outlet_t > 6 and rocks < 4:
-                rocks += 1
-                d = np.array([np.sign(xr) if abs(xr) > env._x_half + 0.005 else 0.0,
-                              np.sign(yr) if abs(yr) > env._y_half + 0.005 else 0.0], dtype=np.float32)
-                print(f"  reload: ball in the outlet at ({xr * 1000:.0f}, {yr * 1000:.0f}) mm -- rock {rocks}/4")
-                env._hold_tilt(0.6 * d, 0.4)
-                env._hold_tilt(-0.8 * d, 0.8)
-                env._servo_level(max_s=2.0)
-                outlet_t = time.time()
             track_lost(found)
             elevator.poll()
             if ui is not None:
