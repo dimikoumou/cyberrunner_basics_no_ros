@@ -34,6 +34,7 @@ from goal_circle import (detect_goal_circle, detect_on_frame, save_debug, save_l
                          pixel_to_plate, inside_region)
 from ui_server import UIServer, FRAME_W, FRAME_H  # noqa: E402
 from line_path import detect_line, PathTracker  # noqa: E402
+import shapes  # noqa: E402
 from rl_policy import RigPolicyController, ODILRigController, ODILFrictionCompRig  # noqa: E402
 from elevator import Elevator  # noqa: E402
 from hole import detect_holes_stable, save_holes, near_hole, detour, HOLE_MARGIN_M  # noqa: E402
@@ -729,6 +730,39 @@ def main():
                             ui.set_state(mode=mode, line_msg=line_msg)
                             ui.set_overlay(path_px=None, contour_px=None)
                             running = True
+                        elif kind == "draw_shape":
+                            # the ball draws a shape / letters once (open path, drawing order),
+                            # routed round the hole, shown on the live view
+                            try:
+                                cx, cy = float(c.get("x", -0.05)), float(c.get("y", 0.02))
+                                size = float(c.get("size", 0.035))
+                                if c.get("text"):
+                                    path = shapes.text(str(c["text"]), (cx, cy), height=2 * size)
+                                else:
+                                    path = shapes.shape(str(c.get("shape", "circle")), (cx, cy), size)
+                            except ValueError as err:
+                                line_msg = str(err)
+                                ui.set_state(line_msg=line_msg)
+                                path = None
+                            if path is not None:
+                                lim = np.array([env._x_half - 0.015, env._y_half - 0.015])
+                                path = np.clip(path, -lim, lim)
+                                routed = [path[0]]
+                                for p0, p1 in zip(path[:-1], path[1:]):
+                                    routed += list(detour(holes, p0, p1)) + [p1]
+                                path = shapes.resample(routed)
+                                mode, live_goal = "path", False
+                                follower = PathTracker(path, False, np.array([xb, yb]), keep_direction=True)
+                                line_active, line_boost = False, 0.0
+                                goal_polygon = goal_contour_px = goal_px = goal_r_px = None
+                                what = f"'{c['text']}'" if c.get("text") else str(c.get("shape", "circle"))
+                                line_msg = f"Drawing {what} ({follower.L * 100:.0f} cm)"
+                                pts_px = [plate_to_pixel(env, q) for q in path[::3]]
+                                pts_px = [(q[1], q[0]) for q in pts_px if q is not None]
+                                ui.set_overlay(path_px=np.array(pts_px) if len(pts_px) > 1 else None,
+                                               path_closed=False, contour_px=None)
+                                ui.set_state(mode=mode, line_msg=line_msg)
+                                running = True
                         elif kind == "click" and mode == "path":
                             row, col = float(c.get("v", -1)) * FRAME_H, float(c.get("u", -1)) * FRAME_W
                             xy = pixel_to_plate(env, row, col)

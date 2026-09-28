@@ -98,6 +98,28 @@ PAGE = """<!doctype html>
         </label>
       </div>
       <div class="panel">
+        <h2>Draw with the ball</h2>
+        <div class="row">
+          <button data-shape="circle">Circle</button>
+          <button data-shape="figure8">Figure 8</button>
+          <button data-shape="heart">Heart</button>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <button data-shape="star">Star</button>
+          <button data-shape="square">Square</button>
+          <button data-shape="spiral">Spiral</button>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <input id="d_text" maxlength="4" placeholder="Letters, e.g. DK"
+                 style="flex:2;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--ink)">
+          <button id="d_write">Write</button>
+        </div>
+        <label style="display:block;margin-top:8px;color:var(--muted);font-size:13px">
+          Size: <span id="d_size_lbl">3.5 cm</span>
+          <input id="d_size" type="range" min="15" max="60" value="35" style="width:100%">
+        </label>
+      </div>
+      <div class="panel">
         <h2>Hole &amp; reload</h2>
         <div class="row">
           <button id="h_drop">Drop into hole</button>
@@ -174,6 +196,10 @@ $('e_dir').onclick = () => {
   eDir = -eDir; $('e_dir').textContent = eDir > 0 ? 'Forward' : 'Reverse';
   cmd({cmd:'elevator', op:'speed', units:eUnits(), dir:eDir});
 };
+const dSize = () => parseInt($('d_size').value, 10) / 1000;
+$('d_size').addEventListener('input', () => { $('d_size_lbl').textContent = (dSize() * 100).toFixed(1) + ' cm'; });
+document.querySelectorAll('[data-shape]').forEach(b => b.onclick = () => cmd({cmd:'draw_shape', shape:b.dataset.shape, size:dSize()}));
+$('d_write').onclick = () => cmd({cmd:'draw_shape', text:$('d_text').value, size:dSize()});
 $('h_drop').onclick = () => cmd({cmd:'drop_test', n:1});
 $('h_drop5').onclick = () => cmd({cmd:'drop_test', n:5});
 $('h_detect').onclick = () => cmd({cmd:'holes_detect'});

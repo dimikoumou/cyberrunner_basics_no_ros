@@ -61,8 +61,9 @@ import numpy as np
 import torch
 
 torch.set_num_threads(int(os.environ.get("ODIL_THREADS", "3")))  # leave cores for the rig
-TAU, A_ROLL, EPS_V, V_STRIBECK = 0.045, 0.025, 0.004, 0.01
-K_RANGE = (0.085, 0.125)
+TAU, EPS_V, V_STRIBECK = 0.045, 0.004, 0.01
+A_ROLL = float(os.environ.get("ODIL_A_ROLL", "0.025"))           # rig fit (sysid_rig.py): 0.042
+K_RANGE = tuple(float(v) for v in os.environ.get("ODIL_K_RANGE", "0.085,0.125").split(","))   # rig: 0.113
 STATIC_DEG_RANGE = tuple(float(v) for v in os.environ.get("ODIL_STATIC_RANGE", "1.2,2.6").split(","))
 R_RANGE = (0.008, 0.03)
 INSIDE_FRAC = float(os.environ.get("ODIL_INSIDE_FRAC", "0.25"))    # of the near starts
