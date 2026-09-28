@@ -577,6 +577,7 @@ def main():
     maze_rest = None
     maze_blend = False
     maze_join_best, maze_join_t, maze_join_alerted, maze_jolts = None, 0.0, False, 0
+    run_still_t, run_jolts = None, 0          # ball stopped mid-run (real maze): jolt it free
     maze_detour, maze_detoured = None, False
     relevel_times = []
     jerk_sum, jerk_n = 0.0, 0
@@ -1225,6 +1226,24 @@ def main():
                         # paper behind the reference stayed there (the ODIL tracker has no stiction term)
                         a_odil = a_odil + (1.0 if not (mode == "maze" and maze_blend) else 0.5) * line_boost * bst
                         action = np.clip(a_odil, -0.8, 0.8)
+                    if mode == "maze" and maze_following:
+                        # real maze (2026-09-28): the ball sat still at a wall end at ~4 deg for the
+                        # whole 15 s stall timeout. After 4 s still, tilt back briefly and snap to
+                        # full tilt at the reference (user: problem-solve a stuck ball); 3 tries
+                        if np.hypot(*vel) < 0.01 and line_ref["lag"] > 0.005:
+                            run_still_t = run_still_t or t_now
+                            if t_now - run_still_t > 4.0 and run_jolts < 3:
+                                run_jolts += 1
+                                d = line_ref["p"] - pos
+                                d = (d / max(np.hypot(*d), 1e-6)).astype(np.float32)
+                                print(f"  maze: run stalled at ({xb * 1000:.0f}, {yb * 1000:.0f}) mm -- jolt {run_jolts}/3")
+                                env._hold_tilt(-0.4 * d, 0.3)
+                                env._hold_tilt(1.0 * d, 0.6)
+                                run_still_t = time.time()
+                        else:
+                            run_still_t = None
+                            if np.hypot(*vel) > 0.02:
+                                run_jolts = 0
                 elif track_ctrl is not None:
                     track_ctrl.reset()          # fresh observer / integral for the next line
                 # Hard override once near an edge -- full brake straight back toward
