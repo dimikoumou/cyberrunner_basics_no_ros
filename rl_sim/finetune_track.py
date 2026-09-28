@@ -30,6 +30,10 @@ DT, SUB = 1.0 / 29.0, 4
 B, STEPS = int(os.environ.get("FT_BATCH", "96")), int(os.environ.get("FT_STEPS", "120"))   # 120 steps ~ 4 s
 A_ROLL, EPS_V, V_STRIB = 0.042, 0.004, 0.01
 POS_NOISE = 0.0004
+JERK_W = float(os.environ.get("FT_JERK_W", "20"))   # smoothness weight (ft1: 20 -> accurate but jerky on the rig)
+# "the board swerved" (user): penalise tilt BEYOND what the line needs -- the reference's own
+# acceleration a_ref / k_acc is the tilt a perfect follower would use
+EFFORT_W = float(os.environ.get("FT_EFFORT_W", "0"))
 
 
 class Pol(torch.nn.Module):
@@ -75,13 +79,14 @@ def rollout(pol, P, V, A, rng, train=True):
     meas_prev = p.clone()
     p_seen, v_seen = p.clone(), v.clone()
     pend_p, pend_v = p.clone(), v.clone()
-    errs, jerk = [], []
+    errs, jerk, effort = [], [], []
     for n in range(STEPS):
         e = P[:, n] - p_seen
         z = z + (e / ot.Z_SCALE - z / ot.TZ) * DT
         feat = torch.cat([e / ot.E_SCALE, (V[:, n] - v_seen) / 0.05, A[:, n] / (ot.K_NOM * 5.0), v_seen / 0.1,
                           o1 / 5.0, o2 / 5.0, z], -1)
         u = pol(feat)                                    # deg
+        effort.append((((u - A[:, n] / ot.K_NOM) / ot.U_MAX_DEG) ** 2).sum(-1))
         a_cmd = torch.clamp(u / 5.0, -0.8, 0.8)
         a_new = applied + torch.clamp(a_cmd - applied, -0.5, 0.5)
         jerk.append(((a_new - applied) ** 2).sum(-1))
@@ -110,7 +115,7 @@ def rollout(pol, P, V, A, rng, train=True):
         p_seen, v_seen = pend_p, pend_v
         pend_p, pend_v = meas, (meas - meas_prev) / DT
         meas_prev = meas
-    return torch.stack(errs, 1), torch.stack(jerk, 1)
+    return torch.stack(errs, 1), torch.stack(jerk, 1), torch.stack(effort, 1)
 
 
 def main():
@@ -126,18 +131,19 @@ def main():
     for it in range(iters):
         if it % 25 == 0:      # fresh references every 25 iterations
             P, V, A = (torch.tensor(a, dtype=torch.float32) for a in ot._references(rng, B, STEPS + 1, STEPS * DT))
-        err, jerk = rollout(pol, P, V, A, rng)
-        loss = ((err / 0.005) ** 2).mean() + 20.0 * jerk.mean()
+        err, jerk, eff = rollout(pol, P, V, A, rng)
+        loss = ((err / 0.005) ** 2).mean() + JERK_W * jerk.mean() + EFFORT_W * eff.mean()
         opt.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(pol.parameters(), 1.0)
         opt.step()
         if it % 100 == 0 or it == iters - 1:
             with torch.no_grad():
-                ev, jv = rollout(pol, Pv, Vv, Av, np.random.default_rng(123), train=False)
+                ev, jv, efv = rollout(pol, Pv, Vv, Av, np.random.default_rng(123), train=False)
             e = ev.flatten().numpy() * 1000
             rec = dict(it=it, median_mm=float(np.median(e)), p90_mm=float(np.percentile(e, 90)),
-                       max_mm=float(e.max()), jerk=float(jv.mean()), minutes=(time.time() - t0) / 60)
+                       max_mm=float(e.max()), jerk=float(jv.mean()), extra_tilt=float(efv.mean()),
+                       minutes=(time.time() - t0) / 60)
             hist.append(rec)
             print(rec, flush=True)
             np.savez(os.path.join(out, "odil_track_policy.npz"),

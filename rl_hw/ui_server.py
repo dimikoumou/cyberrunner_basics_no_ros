@@ -98,6 +98,14 @@ PAGE = """<!doctype html>
         </label>
       </div>
       <div class="panel">
+        <h2>Maze practice (white paper)</h2>
+        <div class="row">
+          <button class="go" id="mz_go">Start (ODIL / classic alternating)</button>
+          <button class="stop" id="mz_stop">Stop</button>
+        </div>
+        <div class="msg" id="mz_msg">–</div>
+      </div>
+      <div class="panel">
         <h2>Self-calibration</h2>
         <div class="row"><button id="cal_go">Self-calibrate (about 2 min)</button></div>
         <div class="msg" id="cal_msg">–</div>
@@ -205,6 +213,8 @@ const dSize = () => parseInt($('d_size').value, 10) / 1000;
 $('d_size').addEventListener('input', () => { $('d_size_lbl').textContent = (dSize() * 100).toFixed(1) + ' cm'; });
 document.querySelectorAll('[data-shape]').forEach(b => b.onclick = () => cmd({cmd:'draw_shape', shape:b.dataset.shape, size:dSize()}));
 $('d_write').onclick = () => cmd({cmd:'draw_shape', text:$('d_text').value, size:dSize()});
+$('mz_go').onclick = () => cmd({cmd:'maze_start', alternate:true, controller:'odil'});
+$('mz_stop').onclick = () => cmd({cmd:'maze_stop'});
 $('cal_go').onclick = () => cmd({cmd:'calibrate'});
 $('h_drop').onclick = () => cmd({cmd:'drop_test', n:1});
 $('h_drop5').onclick = () => cmd({cmd:'drop_test', n:5});
@@ -234,7 +244,7 @@ async function poll() {
   try {
     const s = await (await fetch('/state')).json();
     $('s_run').innerHTML = s.running ? '<span class="ok">balancing</span>' : '<span class="bad">stopped</span>';
-    $('s_mode').textContent = {click:'click to target', sheet:'red region on sheet', line:'follow red line', path:'drawn path', drop:'drop into hole'}[s.mode] || s.mode;
+    $('s_mode').textContent = {click:'click to target', sheet:'red region on sheet', line:'follow red line', path:'drawn path', drop:'drop into hole', maze:'maze practice'}[s.mode] || s.mode;
     $('m_sheet').classList.toggle('on', s.mode === 'sheet');
     $('m_click').classList.toggle('on', s.mode === 'click');
     $('m_line').classList.toggle('on', s.mode === 'line');
@@ -264,6 +274,7 @@ async function poll() {
     if (s.auto_reload !== undefined) $('h_reload').checked = s.auto_reload;
     if (s.hole_msg !== undefined) $('h_status').textContent = s.hole_msg;
     if (s.cal_msg) $('cal_msg').textContent = s.cal_msg;
+    if (s.maze_msg) $('mz_msg').textContent = s.maze_msg;
     $('s_ctrl').textContent = (s.controller || 'classic').endsWith('+classic settle') ? 'classic (near-field settle)'
       : s.controller === 'learned' ? 'learned RL' : s.controller === 'odil' ? 'ODIL' : 'classic';
     $('hint').textContent = s.mode === 'click' ? 'Click the board to send the ball there'
@@ -289,7 +300,7 @@ class UIServer:
         self.state = {"running": False, "mode": "sheet", "ball": None, "goal": None, "goal_r": None,
                       "dist": None, "in_target": False, "hold": None, "hz": None, "controller": "classic"}
         self.overlay = {"contour_px": None, "goal_px": None, "goal_r_px": None, "ball_px": None,
-                        "path_px": None, "path_closed": False, "holes_px": None}
+                        "path_px": None, "path_closed": False, "holes_px": None, "maze": None}
         self._cmds = []
         ui = self
 
@@ -396,6 +407,24 @@ class UIServer:
         if ov.get("path_px") is not None and len(ov["path_px"]) >= 2:
             cv2.polylines(img, [np.asarray(ov["path_px"]).astype(np.int32)], bool(ov.get("path_closed")),
                           (255, 0, 255), 1, cv2.LINE_AA)
+        mz = ov.get("maze")
+        if mz is not None:
+            # virtual maze: walls (dark), holes (red; the one it fell into filled), route (green,
+            # the part already driven in this run brighter)
+            layer = img.copy()
+            for w in mz["walls_px"]:
+                cv2.fillPoly(layer, [np.asarray(w).astype(np.int32)], (40, 40, 40))
+            img = cv2.addWeighted(layer, 0.55, img, 0.45, 0)
+            rp = np.asarray(mz["route_px"]).astype(np.int32)
+            if len(rp) > 1:
+                cv2.polylines(img, [rp], False, (60, 140, 60), 1, cv2.LINE_AA)
+                if mz["done"] > 1:
+                    cv2.polylines(img, [rp[:mz["done"]]], False, (0, 255, 0), 2, cv2.LINE_AA)
+            for hx, hy, hr in mz["holes_px"]:
+                cv2.circle(img, (int(hx), int(hy)), max(2, int(hr)), (0, 0, 230), 1, cv2.LINE_AA)
+            if mz.get("fell") is not None:
+                fx, fy, fr = mz["fell"]
+                cv2.circle(img, (int(fx), int(fy)), max(2, int(fr)), (0, 0, 255), -1, cv2.LINE_AA)
         for hx, hy, hr, kr in (ov.get("holes_px") or []):
             c = (int(round(hx)), int(round(hy)))
             cv2.circle(img, c, max(2, int(round(hr))), (0, 0, 255), 1, cv2.LINE_AA)       # the hole
@@ -410,7 +439,7 @@ class UIServer:
             cv2.circle(img, (int(round(bx)), int(round(by))), 9, (0, 220, 255), 1, cv2.LINE_AA)
         label = ("BALANCING" if st.get("running") else "STOPPED") + "  |  " + {
             "click": "click to target", "sheet": "red region", "line": "follow red line",
-            "path": "drawn path", "drop": "drop into hole"}.get(st.get("mode"), "")
+            "path": "drawn path", "drop": "drop into hole", "maze": "maze practice"}.get(st.get("mode"), "")
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
         cv2.rectangle(img, (4, 4), (12 + tw, 12 + th), (0, 0, 0), -1)
         cv2.putText(img, label, (8, 8 + th), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)

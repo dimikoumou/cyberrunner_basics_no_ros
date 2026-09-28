@@ -98,10 +98,44 @@ for x, y, r in (circles[0] if circles is not None else []):
     if np.all(np.isfinite(c)) and np.all(np.isfinite(e)):
         holes.append({"center": [float(c[0]), float(c[1])], "radius": float(np.hypot(*(e - c))),
                       "px": [float(x), float(y)]})
+# walls: near-black (the printed line and numbers are mid-grey, ~100) and at least ~7 px thick,
+# minus the hole discs; inside a board quad shrunk a little more (the frame's rim shadow)
+quad_w = (ctr + (corners - ctr) * 0.965).astype(np.int32)
+board_w = np.zeros((H, W), np.uint8)
+cv2.fillConvexPoly(board_w, cv2.convexHull(quad_w), 1)
+wall_mask = ((gray < 135) & (board_w > 0)).astype(np.uint8)
+wall_mask = cv2.morphologyEx(wall_mask, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))   # shiny highlights
+wall_mask = cv2.morphologyEx(wall_mask, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)))
+for (x, y, r) in (circles[0] if circles is not None else []):
+    cv2.circle(wall_mask, (int(x), int(y)), int(r * 1.2), 0, -1)
+wall_mask = cv2.morphologyEx(wall_mask, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)))
+# the detected outline includes shadow / edge blur: shrink by ~3 px (about 1 mm)
+wall_mask = cv2.erode(wall_mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)))
+cnts, _ = cv2.findContours(wall_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+walls, walls_px = [], []
+for cn in cnts:
+    x, y, w, h = cv2.boundingRect(cn)
+    if cv2.contourArea(cn) < 250 or max(w, h) < 32:
+        continue
+    # walls are black; printed numbers / the star are grey-violet (~100-130)
+    inside = np.zeros_like(gray)
+    cv2.drawContours(inside, [cn], -1, 1, -1)
+    if np.percentile(gray[inside > 0], 30) > 70:
+        continue
+    (_, _), (rw, rh), _ = cv2.minAreaRect(cn)
+    if cv2.contourArea(cn) < 1500 and max(rw, rh) / max(min(rw, rh), 1.0) < 2.2:
+        continue                                  # small and compact: a number or the star
+    cn = cv2.approxPolyDP(cn, 2.0, True).reshape(-1, 2)
+    poly = [to_plate((float(yy), float(xx))) for xx, yy in cn]
+    poly = [q.tolist() for q in poly if np.all(np.isfinite(q))]
+    if len(poly) >= 3:
+        walls.append(poly)
+        walls_px.append(cn.tolist())
+print(f"walls: {len(walls)} outlines")
 dmin = [float(np.min(np.hypot(*(route - np.array(h["center"])).T))) for h in holes]
 print(f"route: {len(route)} points, {L * 100:.0f} cm long; {len(holes)} holes; "
       f"closest approach route -> hole edge: {min(d - h['radius'] for d, h in zip(dmin, holes)) * 1000:.1f} mm")
-json.dump({"route_m": route.tolist(), "length_m": L, "holes": holes,
+json.dump({"route_m": route.tolist(), "length_m": L, "holes": holes, "walls_m": walls,
            "route_to_hole_edge_mm": [(d - h["radius"]) * 1000 for d, h in zip(dmin, holes)]},
           open(os.path.join(D, "route.json"), "w"), indent=1)
 
@@ -111,5 +145,6 @@ cv2.circle(chk, (int(path_px[0, 1]), int(path_px[0, 0])), 14, (0, 0, 255), 3)   
 cv2.circle(chk, (int(path_px[-1, 1]), int(path_px[-1, 0])), 14, (255, 0, 0), 3)        # end: blue
 for h in holes:
     cv2.circle(chk, (int(h["px"][0]), int(h["px"][1])), 8, (0, 140, 255), -1)
+cv2.polylines(chk, [np.array(w, np.int32) for w in walls_px], True, (255, 0, 255), 2)
 cv2.imwrite(os.path.join(D, "route_check.png"), chk)
 print("wrote", os.path.join(D, "route.json"), "and route_check.png")

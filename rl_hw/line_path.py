@@ -190,7 +190,7 @@ class PathTracker:
     acceleration fed forward (tangential + centripetal on curves) plus rolling
     friction. If the ball falls behind by more than LAG_MAX the reference waits."""
 
-    def __init__(self, path, closed, ball_xy, v=V_LINE, a=A_LINE, keep_direction=False):
+    def __init__(self, path, closed, ball_xy, v=V_LINE, a=A_LINE, keep_direction=False, ref_offset=None):
         """keep_direction: follow the path in the given order (drawn paths start at the
         first clicked point); otherwise an open line starts at the end nearer the ball."""
         path = np.asarray(path, dtype=float)
@@ -227,12 +227,18 @@ class PathTracker:
                 vp[i] = min(vp[i], np.sqrt(vp[i + 1] ** 2 + 2 * self.a_max * ds[i]))
         self.v_prof = vp
         self.offs = []                  # distance ball <-> line while following (accuracy report)
+        # iterative learning control (maze practice): the REFERENCE is the route shifted by a
+        # learned per-point offset; distances are still measured to the true route
+        self.ref_pts = pts if ref_offset is None else pts + np.asarray(ref_offset, dtype=float)[:len(pts)]
 
     def _interp(self, arr, s):
         s = s % self.L if self.closed else min(max(s, 0.0), self.L)
         return np.array([np.interp(s, self.S, arr[:, 0]), np.interp(s, self.S, arr[:, 1])])
 
     def point(self, s):
+        return self._interp(self.ref_pts, s)
+
+    def true_point(self, s):
         return self._interp(self.pts, s)
 
     def _project(self, xy, near_s, window=0.04):

@@ -36,6 +36,7 @@ from ui_server import UIServer, FRAME_W, FRAME_H  # noqa: E402
 from line_path import detect_line, PathTracker, V_LINE  # noqa: E402
 import shapes  # noqa: E402
 import calibrate  # noqa: E402
+from maze_practice import MazePractice  # noqa: E402
 from plate_env import set_position as _set_position  # noqa: E402
 from rl_policy import RigPolicyController, ODILRigController, ODILFrictionCompRig  # noqa: E402
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "rl_sim")))
@@ -552,7 +553,9 @@ def main():
 
     xb = yb = 0.0
     draw_what = "path"
+    draw_j0 = (0.0, 0)
     tour, tour_t0, cal_msg = [], 0.0, ""
+    maze, maze_alt, maze_following, maze_fell = None, False, False, None
     jerk_sum, jerk_n = 0.0, 0
     lost_xy = None
     lost_since, lost_alerted = None, False
@@ -771,6 +774,7 @@ def main():
                                 goal_polygon = goal_contour_px = goal_px = goal_r_px = None
                                 what = f"'{c['text']}'" if c.get("text") else str(c.get("shape", "circle"))
                                 draw_what = f"{what} @ {float(c.get('speed', V_LINE)) * 1000:.0f} mm/s"
+                                draw_j0 = (jerk_sum, jerk_n)
                                 line_msg = f"Drawing {what} ({follower.L * 100:.0f} cm)"
                                 pts_px = [plate_to_pixel(env, q) for q in path[::3]]
                                 pts_px = [(q[1], q[0]) for q in pts_px if q is not None]
@@ -847,6 +851,30 @@ def main():
                             print("calibration:", cal_msg)
                             ui.set_state(cal_msg=cal_msg)
                             obs, _, _, _, info = env.step(np.zeros(2, dtype=np.float32))
+                        elif kind == "maze_start":
+                            # practise the real maze's route on white paper (maze/route.json)
+                            try:
+                                if maze is None:
+                                    maze = MazePractice(env, plate_to_pixel)
+                                maze_alt = bool(c.get("alternate", True))
+                                first = c.get("controller", "odil")
+                                use_odil, use_policy = first == "odil", False
+                                mode, live_goal, vias = "maze", False, []
+                                follower = maze.start_run(first, PathTracker, (xb, yb))
+                                line_active, line_boost, move, maze_following, maze_fell = False, 0.0, None, False, None
+                                draw_j0 = (jerk_sum, jerk_n)
+                                goal_polygon = goal_contour_px = goal_px = goal_r_px = None
+                                ui.set_overlay(path_px=None, contour_px=None)
+                                ui.set_state(mode=mode, maze_msg=maze.status())
+                                running = True
+                            except (OSError, ValueError, KeyError) as err:
+                                ui.set_state(maze_msg=f"maze route not available: {err}")
+                        elif kind == "maze_stop":
+                            if maze is not None and maze.active:
+                                maze.end_run("stopped")
+                            mode, follower, line_active, maze_following = "click", None, False, False
+                            ui.set_overlay(maze=None)
+                            ui.set_state(mode=mode, maze_msg=(maze.status() if maze else ""))
                         elif kind == "drop_test":
                             if not holes:
                                 publish_holes("no hole found -- press Find holes")
@@ -893,7 +921,7 @@ def main():
                     else:
                         adopt_goal(c_, r_, pg_, cp_, px_, rp_, why_ + ", past the hole")
                 line_ref = None
-                if mode in ("line", "path") and follower is not None and running:
+                if mode in ("line", "path", "maze") and follower is not None and running:
                     if not line_active:
                         # join: bring the ball to the route's current reference point first
                         # (a normal planned move), then start following
@@ -914,22 +942,49 @@ def main():
                         env.fixed_goal, env.goal_tolerance = goal, goal_tol
                         if line_ref["finished"]:
                             line_active, line_ref = False, None  # hold at the end with normal balancing
-                            if not line_msg.startswith("Reached the end"):
+                            if not line_msg.startswith("Reached the end") and mode != "maze":
                                 acc = follower.accuracy()
                                 line_msg = "Reached the end of the line" + (
                                     f" -- off the line: median {acc['median_mm']:.1f} mm, 90% within "
-                                    f"{acc['p90_mm']:.1f} mm, max {acc['max_mm']:.1f} mm" if acc else "")
+                                    f"{acc['p90_mm']:.1f} mm, max {acc['max_mm']:.1f} mm, jerk "
+                                    f"{(jerk_sum - draw_j0[0]) / max(1, jerk_n - draw_j0[1]):.4f}" if acc else "")
                                 print(line_msg)
                                 if acc:
                                     try:
                                         with open(os.path.join(os.path.dirname(__file__), "..", "phase3_logs",
                                                                "draw_accuracy.jsonl"), "a") as f_:
                                             f_.write(json.dumps({"t": time.time(), "what": draw_what,
+                                                                 "controller": "odil" if use_odil else "classic",
+                                                                 "jerk": (jerk_sum - draw_j0[0]) / max(1, jerk_n - draw_j0[1]),
                                                                  "length_m": follower.L, **acc}) + "\n")
                                     except OSError:
                                         pass
                                 if ui is not None:
                                     ui.set_state(line_msg=line_msg)
+                    if mode == "maze" and maze is not None and maze.active:
+                        result = None
+                        if maze_following and not line_active:
+                            result = "finished"              # the block above just reached the end
+                        elif line_active and last_found:
+                            maze_following = True
+                            result = maze.step((xb, yb), True)
+                        if result:
+                            jr = (jerk_sum - draw_j0[0]) / max(1, jerk_n - draw_j0[1])
+                            print("maze:", maze.end_run(result, jr))
+                            maze_fell = None
+                            if result.startswith("fell into hole"):
+                                hk = int(result.split()[-1])
+                                maze_fell = maze.holes_px[hk] if hk < len(maze.holes_px) else None
+                            maze_following = False
+                            nxt = ("odil" if maze.ctl == "classic" else "classic") if maze_alt else maze.ctl
+                            use_odil, use_policy = nxt == "odil", False
+                            if track_ctrl is not None:
+                                track_ctrl.reset()
+                            follower = maze.start_run(nxt, PathTracker, (xb, yb))   # back to the start
+                            line_active, line_boost, move, line_ref = False, 0.0, None, None
+                            draw_j0 = (jerk_sum, jerk_n)
+                        if ui is not None:
+                            ui.set_state(maze_msg=maze.status(), controller="odil" if use_odil else "classic")
                     edge_x, edge_y = edge_limits(goal, goal_tol, quiet=True)
                     goal_px = goal_r_px = None
                 if ui is not None or (mode == "line" and follower is not None):
@@ -1104,7 +1159,7 @@ def main():
                 # _attempt_unstick(), which is the only thing that has ever
                 # actually freed the ball from this specific spot. Let the wedge
                 # detector fire and do its job instead of masking it.
-                if (use_policy or use_odil) and running and mode not in ("line", "path"):
+                if (use_policy or use_odil) and running and mode not in ("line", "path", "maze"):
                     handover = max(HANDOVER_MIN, HANDOVER_R_SCALE * goal_tol)
                     if not hybrid:
                         policy_driving = True
@@ -1151,7 +1206,7 @@ def main():
                 ball_found = bool(info.get("ball_found", True))
                 last_found = ball_found
                 track_lost(ball_found)
-                if mode in ("line", "path") and follower is not None:
+                if mode in ("line", "path", "maze") and follower is not None:
                     in_circle = ball_found and line_off is not None and line_off < LINE_TOL * 1.25
                 elif goal_polygon is not None and len(goal_polygon) >= 3:
                     in_circle = ball_found and inside_region(goal_polygon, (obs[0], obs[1]))
@@ -1211,10 +1266,12 @@ def main():
                                  running=running, mode=mode,
                                  ball=[float(obs[0]), float(obs[1])] if ball_found else None,
                                  goal=[goal[0], goal[1]], goal_r=goal_tol,
-                                 dist=(line_off if (mode in ("line", "path") and follower is not None) else dist) if ball_found else None,
+                                 dist=(line_off if (mode in ("line", "path", "maze") and follower is not None) else dist) if ball_found else None,
                                  in_target=bool(in_circle), hold=(now - hold_start) if hold_start else 0.0,
                                  jerk_sum=jerk_sum, jerk_n=jerk_n,
                                  hz=(1.0 / dt_real) if dt_real > 0 else None)
+                    if mode == "maze" and maze is not None:
+                        ui.set_overlay(maze=maze.overlay(maze_fell))
                     ui.set_overlay(ball_px=getattr(env.pipeline.measurements.detector, "ball_pos", None) if ball_found else None,
                                    goal_px=goal_px, goal_r_px=goal_r_px, contour_px=goal_contour_px)
                 log.write(f"{now - t_start:.3f},{episode},{i},{obs[0]:.5f},{obs[1]:.5f},{obs[2]:.4f},"
