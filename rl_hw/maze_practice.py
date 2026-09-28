@@ -24,6 +24,7 @@ WALL_TOL = 0.0015            # m: inside a wall outline by more than this = cros
 ILC_GAIN = 0.2              # 0.5 overcorrected: ODIL went from 21-65 % to failing at 4 % every run
 ILC_LEAD_S = 0.15            # the loop reacts ~0.15 s late: correct that much earlier
 ILC_MAX = 0.008              # m, never shift the reference further than this (15 mm let it drift into walls)
+LOS_TOL_M = float(os.environ.get("PD_MAZE_LOS_MM", "3")) / 1000   # target stays in sight (no corner cutting)
 MAZE_SPEED = float(os.environ.get("PD_MAZE_SPEED", "0.025"))
 STALL_S = 15.0
 LEARN = os.environ.get("PD_MAZE_LEARN", "1") == "1"   # 0: no ILC / slow zones (diagnostic baseline)
@@ -91,7 +92,8 @@ class MazePractice:
         self.t_progress = None
         self.follower = tracker_cls(self.route, False, np.asarray(ball_xy), keep_direction=True, v=MAZE_SPEED,
                                     ref_offset=self.ilc[ctl] if LEARN else None,
-                                    speed_scale=self.slow[ctl] if LEARN else None)
+                                    speed_scale=self.slow[ctl] if LEARN else None,
+                                    los_tol=LOS_TOL_M)
         self.active = True
         return self.follower
 

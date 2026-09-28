@@ -191,8 +191,11 @@ class PathTracker:
     friction. If the ball falls behind by more than LAG_MAX the reference waits."""
 
     def __init__(self, path, closed, ball_xy, v=V_LINE, a=A_LINE, keep_direction=False, ref_offset=None,
-                 speed_scale=None):
-        """keep_direction: follow the path in the given order (drawn paths start at the
+                 speed_scale=None, los_tol=None):
+        """los_tol: (maze) keep the reference in straight-line sight of the ball -- the
+        chord ball -> reference may leave the route by at most los_tol (m), so the target
+        never sits past a corner, behind a wall the ball would be pushed into.
+        keep_direction: follow the path in the given order (drawn paths start at the
         first clicked point); otherwise an open line starts at the end nearer the ball."""
         path = np.asarray(path, dtype=float)
         ball_xy = np.asarray(ball_xy, dtype=float)
@@ -200,6 +203,7 @@ class PathTracker:
                 and np.hypot(*(path[-1] - ball_xy)) < np.hypot(*(path[0] - ball_xy))):
             path = path[::-1]
         self.closed, self.v_max, self.a_max = closed, v, a
+        self.los_tol = los_tol
         pts = np.vstack([path, path[:1]]) if closed else path
         seg = np.hypot(*np.diff(pts, axis=0).T)
         self.S = np.concatenate([[0.0], np.cumsum(seg)])
@@ -254,6 +258,23 @@ class PathTracker:
             d = np.where(ds <= window, d, np.inf)
         return float(self.S[int(np.argmin(d))])
 
+    def _visible_s(self, xy, s_from, s_to):
+        """furthest route position in [s_from, s_to] whose chord from xy stays within
+        los_tol of the route points in between"""
+        i0 = int(np.searchsorted(self.S, s_from))
+        i1 = int(np.searchsorted(self.S, s_to))
+        best = s_from
+        for j in range(i0 + 1, min(i1, len(self.pts) - 1) + 1):
+            c = self.pts[j] - xy
+            n = max(np.hypot(*c), 1e-9)
+            q = self.pts[i0:j] - xy
+            t = np.clip((q @ c) / n ** 2, 0.0, 1.0)
+            dev = np.hypot(*(q - t[:, None] * c).T)
+            if dev.max() > self.los_tol:
+                break
+            best = float(self.S[j])
+        return best
+
     def off_line(self, xy):
         return float(np.min(np.hypot(*(self.pts - np.asarray(xy)).T)))
 
@@ -273,6 +294,11 @@ class PathTracker:
         self.s = self.s + self.v * dt
         if not self.closed:
             self.s = min(self.s, self.L)
+        if self.los_tol and not self.closed and self.s > s_ball:
+            s_vis = self._visible_s(np.asarray(ball_xy, dtype=float), s_ball, self.s)
+            if self.s > s_vis:          # target would be behind a corner -> pull it back
+                self.s = s_vis
+                self.v = min(self.v, 0.5 * V_CORNER_MIN)
         t_hat = self._interp(self.T, self.s)
         t_hat = t_hat / max(np.hypot(*t_hat), 1e-9)
         a = (dv / max(dt, 1e-3)) * t_hat + self.v ** 2 * self._interp(self.K, self.s)

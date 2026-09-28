@@ -512,6 +512,7 @@ def main():
         else:
             elevator.start()
         started = True
+        outlet_t, rocks = None, 0
         print(f"ball lost -- running the elevator at {elevator.units} units until it is back")
         env._servo_level(max_s=3.0)            # level on the camera-measured angle
         level = np.zeros(2, dtype=np.float32)
@@ -524,6 +525,20 @@ def main():
             ok = (found and near_hole(holes, (xr, yr), extra=-HOLE_MARGIN_M) is None
                   and abs(xr) < env._x_half + 0.005 and abs(yr) < env._y_half + 0.005)
             seen = seen + 1 if ok else 0
+            # stuck in the outlet just off the board edge (real maze, 2026-09-28: two 60 s reloads
+            # failed with the ball sitting there): rock it in -- dip that edge 0.4 s so the board
+            # drops below the outlet lip, then tilt the other way so it rolls onto the board
+            off = found and not ok and (abs(yr) > env._y_half + 0.005 or abs(xr) > env._x_half + 0.005)
+            outlet_t = (outlet_t or time.time()) if off else None
+            if off and time.time() - outlet_t > 6 and rocks < 4:
+                rocks += 1
+                d = np.array([np.sign(xr) if abs(xr) > env._x_half + 0.005 else 0.0,
+                              np.sign(yr) if abs(yr) > env._y_half + 0.005 else 0.0], dtype=np.float32)
+                print(f"  reload: ball in the outlet at ({xr * 1000:.0f}, {yr * 1000:.0f}) mm -- rock {rocks}/4")
+                env._hold_tilt(0.6 * d, 0.4)
+                env._hold_tilt(-0.8 * d, 0.8)
+                env._servo_level(max_s=2.0)
+                outlet_t = time.time()
             track_lost(found)
             elevator.poll()
             if ui is not None:
@@ -1188,13 +1203,19 @@ def main():
                 if line_ref is not None and running:
                     pos, vel = np.array([xb, yb]), np.array([vx, vy])
                     th_ = line_ref["t_hat"]
+                    bst = th_
+                    if mode == "maze" and np.hypot(*(line_ref["p"] - pos)) > 0.003:
+                        # real walls (2026-09-28): at a corner the route tangent at the reference
+                        # points past the wall end -- the boost pressed the ball into the wall at
+                        # full tilt. Push straight at the (in-sight, see los_tol) reference instead.
+                        bst = (line_ref["p"] - pos) / np.hypot(*(line_ref["p"] - pos))
                     if np.hypot(*vel) < 0.01 and line_ref["lag"] > 0.005:
                         line_boost = min(LINE_BOOST_MAX, line_boost + LINE_BOOST_RATE * dt_real)
                     else:
                         line_boost = max(0.0, line_boost - 2 * LINE_BOOST_RATE * dt_real)
                     ff_l = (line_ref["a"] + (A_ROLL_FF * th_ if np.hypot(*line_ref["v"]) > 0.005 else 0.0)) / ACC_PER_ACTION
                     a_line = (ff_l + KP_LINE * (line_ref["p"] - pos) + KD_LINE * (line_ref["v"] - vel)
-                              + integ + line_boost * th_)
+                              + integ + line_boost * bst)
                     action = np.clip(np.asarray(a_line, dtype=np.float32), -0.8, 0.8)
                     if use_odil and track_ctrl is not None:
                         a_odil = np.asarray(track_ctrl(line_ref, pos, vel, dt_real if dt_real > 0 else None), dtype=np.float32)
@@ -1202,7 +1223,7 @@ def main():
                             a_odil = 0.5 * a_odil + 0.5 * np.asarray(a_line, dtype=np.float32)   # ODIL + classic
                         # the same breakaway boost as the classic line law, in full: a ball stuck on the
                         # paper behind the reference stayed there (the ODIL tracker has no stiction term)
-                        a_odil = a_odil + (1.0 if not (mode == "maze" and maze_blend) else 0.5) * line_boost * th_
+                        a_odil = a_odil + (1.0 if not (mode == "maze" and maze_blend) else 0.5) * line_boost * bst
                         action = np.clip(a_odil, -0.8, 0.8)
                 elif track_ctrl is not None:
                     track_ctrl.reset()          # fresh observer / integral for the next line
