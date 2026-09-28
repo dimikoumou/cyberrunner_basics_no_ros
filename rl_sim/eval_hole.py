@@ -99,7 +99,8 @@ if __name__ == "__main__":
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 200
     for name, c in [("v11+fc, ignores hole", HoleODIL("runs/odil_v11/odil_policy.npz")),
                     ("v11+fc + via points", Vias(HoleODIL("runs/odil_v11/odil_policy.npz"))),
-                    ("v12+fc, hole as input", HoleODIL("runs/odil_v12/odil_policy.npz"))]:
+                    ("v12+fc, hole as input", HoleODIL("runs/odil_v12/odil_policy.npz")),
+                    ("v12b+fc, hole as input", HoleODIL("runs/odil_v12b/odil_policy.npz"))]:
         r = run(c, n)
         print(f"{name:24s} episodes {r['n']}  fell {r['fell'] * 100:4.0f} %  reached {r['reached'] * 100:4.0f} %  "
               f"t_reach {r['t_reach']:.2f}s  jerk {r['jerk']:.4f}")

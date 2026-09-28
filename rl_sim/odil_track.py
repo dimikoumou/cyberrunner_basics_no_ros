@@ -28,6 +28,7 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 TAU_OBS, K_NOM = 0.045, 0.113
 TZ, Z_SCALE = 1.0, 0.01
+E_SCALE = float(os.environ.get("ODIL_E_SCALE", "0.05"))   # v1: 0.02 (saturated at 1-2 cm lag)
 U_MAX_DEG = 4.0
 
 
@@ -48,7 +49,7 @@ class TrackPolicy:
         dt = dt or self.DT
         e = np.asarray(ref["p"]) - np.asarray(pos)
         self.z += (e / Z_SCALE - self.z / TZ) * dt
-        feat = np.concatenate([e / 0.02, (np.asarray(ref["v"]) - vel) / 0.05, np.asarray(ref["a"]) / (K_NOM * 5.0),
+        feat = np.concatenate([e / E_SCALE, (np.asarray(ref["v"]) - vel) / 0.05, np.asarray(ref["a"]) / (K_NOM * 5.0),
                                np.asarray(vel) / 0.1, self.o1 / 5.0, self.o2 / 5.0, self.z])
         h = feat
         for i, (W, b) in enumerate(self.layers):
@@ -116,7 +117,7 @@ def main():
     torch.manual_seed(3)
     M, N, T = int(os.environ.get("ODIL_PAIRS", "512")), 61, 3.0
     dt = T / (N - 1)
-    NST = 3
+    NST = int(os.environ.get("ODIL_N_STAGES", "5"))            # v1: 3 (too little phase lag)
     A_ROLL, EPS_V, V_STRIB = 0.042, 0.004, 0.01
     W_TRACK = float(os.environ.get("ODIL_W_TRACK", "1.0"))
     Pr, Vr, Ar = (torch.tensor(a, dtype=torch.float32) for a in _references(rng, M, N, T))
@@ -130,11 +131,18 @@ def main():
     bd = rng.normal(0, 1, (M, 2))
     bd = bd / np.linalg.norm(bd, axis=1, keepdims=True) * rng.uniform(0, 0.8, (M, 1))
     bias = torch.tensor(bd[:, None, :], dtype=torch.float32)
-    taus = torch.tensor(rng.uniform(0.025, 0.07, (M, 1, NST)), dtype=torch.float32)
+    taus = torch.tensor(rng.uniform(*[float(v) for v in os.environ.get("ODIL_TAU_RANGE", "0.015,0.045").split(",")],
+                                    (M, 1, NST)), dtype=torch.float32)
     # start: a few mm off the reference, roughly at its speed, tilted for its acceleration
     x0 = torch.zeros(M, NS)
-    x0[:, 0:2] = Pr[:, 0] + torch.tensor(rng.normal(0, 0.004, (M, 2)), dtype=torch.float32)
-    x0[:, 2:4] = Vr[:, 0] * torch.tensor(rng.uniform(0.5, 1.2, (M, 1)), dtype=torch.float32)
+    # v2: harder starts -- up to 2 cm off / behind the reference, 40 % at REST while the
+    # reference already moves (the stiction start that broke v1 in the simulator)
+    t_hat0 = Vr[:, 0] / torch.clamp(Vr[:, 0].norm(dim=-1, keepdim=True), min=1e-6)
+    behind = torch.tensor(rng.uniform(0.0, 0.02, (M, 1)), dtype=torch.float32)
+    x0[:, 0:2] = Pr[:, 0] - t_hat0 * behind + torch.tensor(rng.normal(0, 0.006, (M, 2)), dtype=torch.float32)
+    at_rest = torch.tensor(rng.random((M, 1)) < 0.4)
+    x0[:, 2:4] = torch.where(at_rest, torch.zeros(M, 2),
+                             Vr[:, 0] * torch.tensor(rng.uniform(0.3, 1.2, (M, 1)), dtype=torch.float32))
     tilt0 = Ar[:, 0] / k_acc[:, 0]
     for s_ in CH + [O1, O2]:
         x0[:, s_] = tilt0
@@ -152,7 +160,7 @@ def main():
 
         def forward(self, x, r, vr, ar):
             e = r - x[..., 0:2]
-            feat = torch.cat([e / 0.02, (vr - x[..., 2:4]) / 0.05, ar / (K_NOM * 5.0), x[..., 2:4] / 0.1,
+            feat = torch.cat([e / E_SCALE, (vr - x[..., 2:4]) / 0.05, ar / (K_NOM * 5.0), x[..., 2:4] / 0.1,
                               x[..., O1] / 5.0, x[..., O2] / 5.0, x[..., Z]], -1)
             return U_MAX_DEG * torch.tanh(self.net(feat))
 

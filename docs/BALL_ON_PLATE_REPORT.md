@@ -294,6 +294,26 @@ than every other setup. RL + settle is the fastest. (One ODIL trip excluded: bal
   and star similar. Slower lowers the median but not the tail (stick-slip hops). Not yet maze-ready;
   next: ODIL trained to follow a moving reference, and routes that use the walls.
 
+### ODIL path tracking (for drawing -> maze)
+- **ODIL tracking policy** (`rl_sim/odil_track.py`): the ball follows a moving reference (the rig's
+  PathTracker); trained on random arcs / straights / corners / waves at 1-4 cm/s with the rig-fitted
+  model. Alone it fits its optimised trajectories (0.7 mm) but drifts in closed loop (even in its own
+  model: median 7 mm, p90 30 mm) -- the discrete loss never shows it its own compounding errors.
+- **Closed-loop refinement** (`rl_sim/finetune_track.py`): the ODIL policy is the initial policy and
+  is refined by backpropagation through closed-loop rollouts in a differentiable model with the
+  rig-identified timing (1-3 steps pure delay + 60-110 ms lag, 1 frame camera delay, noisy finite-
+  difference velocity, rate limit, smooth static friction). Sim test: completes 93-100 % of drawings
+  (classic line law 33-93 %, it stalls on stiction), p90 ~10 mm (8-25), max 26-36 mm (41-60).
+- **Rig, 9 drawings each (circle / square / star, 3 cm/s, 3 rounds):**
+
+| Follower | Median of medians | Mean p90 | Mean max | Worst max |
+|---|---|---|---|---|
+| Classic line law | 4.2 mm | 13.1 mm | 20.3 mm | 36.8 mm |
+| **ODIL + closed-loop refinement** | **3.6 mm** | **8.4 mm** | **15.0 mm** | **19.1 mm** |
+
+  Not yet maze-grade (goal: p90 <= 5 mm), but the tail -- what drops a ball into a hole -- is
+  roughly halved.
+
 ## 9. Recommended next steps
 
 1. **Pure ODIL near-field precision** (10.8 mm vs ~6 mm for the hybrids): v10 (4-stage delay,

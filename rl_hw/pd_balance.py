@@ -38,6 +38,8 @@ import shapes  # noqa: E402
 import calibrate  # noqa: E402
 from plate_env import set_position as _set_position  # noqa: E402
 from rl_policy import RigPolicyController, ODILRigController, ODILFrictionCompRig  # noqa: E402
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "rl_sim")))
+from odil_track import TrackPolicy  # noqa: E402  (numpy only)
 from elevator import Elevator  # noqa: E402
 from hole import detect_holes_stable, save_holes, near_hole, detour, HOLE_MARGIN_M  # noqa: E402
 from plate_env import LEVEL_OFFSET_DEG  # noqa: E402
@@ -350,6 +352,13 @@ def main():
     # PD_ODIL_FC=0 disables the stiction compensation (pure ODIL policy)
     odil_cls = ODILRigController if os.environ.get("PD_ODIL_FC") == "0" else ODILFrictionCompRig
     odil_ctrl = odil_cls(odil_path) if os.path.exists(odil_path) else None
+    # ODIL path-tracking policy (rl_sim/odil_track.py + finetune_track.py): used for line / path /
+    # drawing modes when the ODIL controller is selected
+    track_path = os.environ.get("PD_ODIL_TRACK") or os.path.abspath(os.path.join(
+        os.path.dirname(__file__), "..", "rl_sim", "runs", "odil_track_best", "odil_track_policy.npz"))
+    track_ctrl = TrackPolicy(track_path) if os.path.exists(track_path) else None
+    if track_ctrl is not None:
+        print(f"ODIL tracking policy available: {track_path}")
     use_odil = bool(os.environ.get("PD_ODIL")) and odil_ctrl is not None
     hybrid = os.environ.get("PD_HYBRID", "1") == "1"
     if odil_ctrl is not None:
@@ -1062,6 +1071,11 @@ def main():
                     a_line = (ff_l + KP_LINE * (line_ref["p"] - pos) + KD_LINE * (line_ref["v"] - vel)
                               + integ + line_boost * th_)
                     action = np.clip(np.asarray(a_line, dtype=np.float32), -0.8, 0.8)
+                    if use_odil and track_ctrl is not None:
+                        action = np.clip(np.asarray(track_ctrl(line_ref, pos, vel, dt_real if dt_real > 0 else None),
+                                                    dtype=np.float32), -0.8, 0.8)
+                elif track_ctrl is not None:
+                    track_ctrl.reset()          # fresh observer / integral for the next line
                 # Hard override once near an edge -- full brake straight back toward
                 # center on whichever axis is in danger, overriding the blended 2D
                 # goal-seeking above. Without this the combined X+Y correction can
