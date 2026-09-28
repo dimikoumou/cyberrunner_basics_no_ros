@@ -41,6 +41,7 @@ from plate_env import set_position as _set_position  # noqa: E402
 from rl_policy import RigPolicyController, ODILRigController, ODILFrictionCompRig  # noqa: E402
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "rl_sim")))
 from odil_track import TrackPolicy  # noqa: E402  (numpy only)
+MAZE_REAL = os.environ.get("PD_MAZE_REAL") == "1"   # the real maze board (walls, real holes)
 from elevator import Elevator  # noqa: E402
 from hole import detect_holes_stable, save_holes, near_hole, detour, HOLE_MARGIN_M  # noqa: E402
 from plate_env import LEVEL_OFFSET_DEG  # noqa: E402
@@ -296,6 +297,32 @@ def _alert(msg):
 
 def _sigterm(*_):
     raise KeyboardInterrupt   # a plain `kill` (or a background run, where Ctrl-C is ignored) shuts down cleanly
+
+
+def back_waypoint(route, ball, arc=0.04, tol=0.003, near=0.025):
+    """Next point for returning to the start of a walled maze: the route point furthest
+    back (up to `arc` along the route) that the ball can reach in a straight line -- the
+    chord may leave the route by at most `tol`. None if the ball is not near the route or
+    already close to the start (then the start itself is the goal)."""
+    d = np.hypot(*(route - ball).T)
+    k = int(np.argmin(d))
+    if d[k] > near:
+        return None
+    S = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(route, axis=0).T))])
+    if S[k] < arc:
+        return None
+    best = None
+    for j in range(k - 1, -1, -1):
+        if S[k] - S[j] > arc:
+            break
+        c = route[j] - ball
+        n2 = max(float(c @ c), 1e-12)
+        q = route[j:k + 1] - ball
+        t = np.clip((q @ c) / n2, 0.0, 1.0)
+        if np.hypot(*(q - t[:, None] * c).T).max() > tol:
+            break
+        best = route[j].copy()
+    return best
 
 
 def main():
@@ -577,6 +604,7 @@ def main():
     maze_rest = None
     maze_blend = False
     maze_join_best, maze_join_t, maze_join_alerted, maze_jolts = None, 0.0, False, 0
+    maze_back_wp = None                       # real maze: next waypoint back along the route
     run_still_t, run_jolts = None, 0          # ball stopped mid-run (real maze): jolt it free
     maze_detour, maze_detoured = None, False
     relevel_times = []
@@ -962,6 +990,16 @@ def main():
                                 maze_detour = None
                                 join_goal = join
                                 maze_join_best, maze_jolts = None, 0          # fresh tries from here
+                        if mode == "maze" and MAZE_REAL and maze is not None and maze_detour is None:
+                            # real maze (2026-09-28): the straight line to the start runs through
+                            # walls (a ball sat 20 min against one) -- go back ALONG the route,
+                            # via in-sight route points up to 4 cm back, re-picked when reached
+                            b_ = np.array([xb, yb])
+                            if (maze_back_wp is None or np.hypot(*(maze_back_wp - b_)) < 0.010
+                                    or np.hypot(*(maze_back_wp - b_)) > 0.06):
+                                maze_back_wp = back_waypoint(maze.route, b_)
+                            if maze_back_wp is not None:
+                                join_goal = maze_back_wp
                         line_off = follower.off_line((xb, yb))
                         dj = float(np.hypot(*(join - np.array([xb, yb]))))
                         if (mode == "maze" and elevator is not None and last_found
@@ -980,7 +1018,7 @@ def main():
                                 # away from the edge, then snap to full tilt towards the start
                                 # (user: "just jolt"); up to 3 tries, then alert
                                 maze_jolts += 1
-                                d = np.array(join) - np.array([xb, yb])
+                                d = np.array(join_goal) - np.array([xb, yb])
                                 d = d / max(np.hypot(*d), 1e-6)
                                 print(f"  maze: stuck at ({xb * 1000:.0f}, {yb * 1000:.0f}) mm -- jolt {maze_jolts}/3")
                                 env._hold_tilt((-0.5 * d).astype(np.float32), 0.5)
@@ -1008,7 +1046,7 @@ def main():
                         else:
                             ready = dj < LINE_JOIN_M
                         if ready:
-                            line_active, move = True, None
+                            line_active, move, maze_back_wp = True, None, None
                             maze_join_best, maze_join_alerted = None, False
                             maze_detour, maze_detoured = None, False
                         elif goal != (float(join_goal[0]), float(join_goal[1])):
