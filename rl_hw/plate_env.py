@@ -147,7 +147,7 @@ MOTOR_CAP_TICKS_MAX = 1200    # never more than this from level, whatever the me
 STALL_TICKS = 10 ** 9   # (tick-count stall guard disabled)
 STALL_GAIN_DEG = 0.3
 STALL_RETARGET_DEG = 2.0   # a new command (target moved this much) is a fresh attempt
-TICK_BOUNDS = {1: (1800, 3900), 3: (-40000, 40000)}  # m3 in extended position (multi-turn) mode since 2026-09-28: its level point drifts past one revolution; the camera angle guard + motor cap relative to the tracked level protect it
+TICK_BOUNDS = {1: (1800, 3900), 3: (-500000, 500000)}  # m3 in extended position (multi-turn) mode since 2026-09-28: its level point drifts (~+900 ticks/h, 23500 -> 31769 overnight 2026-09-29; the old 40000 bound would have been hit); the camera angle guard + motor cap relative to the tracked level protect it
 LEVEL_TOL_DEG = 0.4
 # Delay-aligned correction (research workflow 2026-09-26, Smith-predictor idea):
 # the camera tilt is 4 (alpha) / 5 (beta) steps old at the ~29 Hz loop (lag from

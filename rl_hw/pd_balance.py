@@ -696,7 +696,9 @@ def main():
                     env._write_action(np.zeros(2, dtype=np.float32))
                     xr_, yr_, _, _, f_ = env._read_state()
                     n_all += 1
-                    n_ok += int(f_ and abs(xr_) < env._x_half and abs(yr_) < env._y_half)
+                    # on the board OR in the elevator outlet just above its edge (the maze join
+                    # pushes it out from there; a ball put back in the outlet deadlocked the re-arm)
+                    n_ok += int(f_ and abs(xr_) < env._x_half + 0.01 and abs(yr_) < env._y_half + 0.035)
                     time.sleep(0.03)
                 if n_all and n_ok / n_all > 0.8:
                     auto_reload, reload_paused, reload_fails = True, False, 0
