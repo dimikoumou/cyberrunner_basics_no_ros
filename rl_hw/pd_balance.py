@@ -450,6 +450,7 @@ def main():
     holes = [] if os.environ.get("PD_HOLES") == "0" else detect_holes_stable(env)
     save_holes(holes)
     auto_reload = elevator is not None
+    reload_fails, reload_paused = 0, False
     drop_left, drop_times, drop_prev, restore_after_reset = 0, [], None, False
     vias, final_target = [], (goal, goal_tol, goal_polygon, goal_contour_px, goal_px, goal_r_px, "start")
     for h in holes:
@@ -671,6 +672,12 @@ def main():
             if lost_xy is not None and auto_reload and elevator is not None:
                 in_hole = bool(holes) and near_hole(holes, lost_xy, extra=0.015) is not None
                 ok_, secs = reload_ball(RELOAD_TIMEOUT_S)
+                # a ball stuck under the maze: after 3 failed reloads in a row stop running the
+                # elevator (it cycled all night otherwise); re-armed once the ball is seen again
+                reload_fails = 0 if ok_ else reload_fails + 1
+                if reload_fails >= 3:
+                    auto_reload, reload_paused = False, True
+                    _alert("elevator: 3 reloads failed -- ball stuck somewhere; elevator off, waiting with the plate level")
                 if ok_ and in_hole:
                     drop_times.append(secs)
                     if mode == "drop":
@@ -680,6 +687,9 @@ def main():
             lost_xy = None
             obs, info = env.reset()
             xb, yb = float(obs[0]), float(obs[1])
+            if reload_paused:                     # the ball is back (someone put it on the board)
+                auto_reload, reload_paused, reload_fails = True, False, 0
+                print("ball is back -- automatic reloads on again")
             if episode == 1 and holes and mode != "click":
                 set_target(*final_target[:6], why="start", from_xy=(xb, yb))   # first move routes round the hole
             if mode == "drop" and drop_left > 0 and holes:
