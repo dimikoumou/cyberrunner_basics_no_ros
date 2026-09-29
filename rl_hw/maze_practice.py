@@ -64,6 +64,15 @@ class MazePractice:
             self.slow[ctl] = np.load(fs) if os.path.exists(fs) else np.ones(self.n)
             self.fail_at[ctl] = []
         self.run_no, self.best = 0, {c: 0.0 for c in ("classic", "odil", "blend")}
+        # an A/B that spans controller restarts (PD_MAZE_AB_T0 = its start): continue the
+        # route x cap rotation where it stopped instead of restarting it at the first variant
+        ab_t0 = float(os.environ.get("PD_MAZE_AB_T0", "0") or 0)
+        if ab_t0:
+            try:
+                self.run_no = sum(1 for l in open(LOG_PATH) if json.loads(l).get("t", 0) > ab_t0)
+            except (OSError, ValueError):
+                pass
+        self.run_offset = self.run_no
         self.last = ""
         self.fail_counts = {}
         self._pixels(env, plate_to_pixel)
@@ -113,6 +122,7 @@ class MazePractice:
         self.t_progress = None
         self.retries, self.retry_req = 0, False
         self.fall_xy = None
+        self.t_follow = None
         self.follower = tracker_cls(self.route, False, np.asarray(ball_xy), keep_direction=True, v=MAZE_SPEED,
                                     ref_offset=self.ilc[ctl] if LEARN and len(self.ilc[ctl]) == self.n else None,
                                     speed_scale=self.slow[ctl] if LEARN and len(self.slow[ctl]) == self.n else None,
@@ -124,6 +134,8 @@ class MazePractice:
         """call every frame the ball is seen; -> None or a failure string"""
         if not following:
             return None                                # joining the route: no checks yet
+        if getattr(self, "t_follow", None) is None:
+            self.t_follow = time.time()                # the run proper starts here (not at the join)
         b = np.asarray(ball_xy, dtype=float)
         idx = int(np.searchsorted(self.follower.S, self.follower._project(b, self.follower.s)))
         idx = min(idx, self.n - 1)
@@ -200,7 +212,7 @@ class MazePractice:
                       f"(now x{self.slow[self.ctl][c]:.2f})")
         rec = {"t": time.time(), "run": self.run_no, "controller": self.ctl, "learn": LEARN, "real": REAL,
                "policy": os.environ.get("PD_ODIL_TRACK", "default"), "result": result,
-               "progress": progress, "retries": getattr(self, "retries", 0), "gain": float(os.environ.get("PD_MAZE_GAIN", "1.0")), "fall_xy": getattr(self, "fall_xy", None), "route": self.route_name, "vcap_mm_s": 1000 * getattr(self, "vcap", 0.0), "duration_s": time.time() - self.t0, "jerk": jerk, **acc}
+               "progress": progress, "retries": getattr(self, "retries", 0), "gain": float(os.environ.get("PD_MAZE_GAIN", "1.0")), "fall_xy": getattr(self, "fall_xy", None), "route": self.route_name, "vcap_mm_s": 1000 * getattr(self, "vcap", 0.0), "duration_s": time.time() - (getattr(self, "t_follow", None) or self.t0), "with_join_s": time.time() - self.t0, "jerk": jerk, **acc}
         os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
         with open(LOG_PATH, "a") as f:
             f.write(json.dumps(rec) + "\n")

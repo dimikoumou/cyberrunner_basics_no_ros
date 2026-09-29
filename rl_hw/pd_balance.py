@@ -1052,8 +1052,19 @@ def main():
                                 and (abs(yb) > env._y_half + 0.005 or abs(xb) > env._x_half + 0.005)):
                             # the ball is still in the elevator's outlet above the board: push it out
                             print(f"  maze: ball at ({xb * 1000:.0f}, {yb * 1000:.0f}) mm is off the board (outlet) -> elevator")
-                            reload_ball(RELOAD_TIMEOUT_S)
+                            ok_o, _ = reload_ball(RELOAD_TIMEOUT_S)
                             maze_join_best, maze_join_t = None, time.time()
+                            # the same cap as the episode reloads (this path pushed 10+ times in a row)
+                            reload_fails = 0 if ok_o else reload_fails + 1
+                            if reload_fails >= 3:
+                                _alert("elevator: 3 pushes from the outlet failed -- ball stuck in the outlet; "
+                                       "waiting 10 min before trying again, plate level")
+                                t_w = time.time()
+                                while time.time() - t_w < 600:
+                                    env._write_action(np.zeros(2, dtype=np.float32))
+                                    env._read_state()
+                                    time.sleep(0.05)
+                                reload_fails = 0
                         if mode == "maze":
                             # returning to the start: alert once if it has not got closer for 30 s
                             # (a ball stuck on the paper seam sat still for 53 min unnoticed)
