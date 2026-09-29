@@ -137,6 +137,9 @@ def _drive_round(policy, real, fallback, bar):
     return runs_since(t0), newest_log, rejected
 
 
+REAL_BOARD = "--real" in sys.argv
+
+
 def train(round_no, policy, logs):
     py = os.path.join(ROOT, ".venv-rl", "bin", "python3")
     wm = os.path.join(SIM, "runs", "world_model_loop.pt")
@@ -148,7 +151,11 @@ def train(round_no, policy, logs):
     # policy that pushed to the motor caps): fewer iterations, lower rate, extra tilt penalised
     env = dict(os.environ, FT_WORLD=wm, FT_ROUTE=os.path.join(ROOT, "maze", "route.json"), FT_THREADS="6",
                WM_DELAY=os.environ.get("WM_DELAY", "3"), FT_LR=os.environ.get("FT_LR", "1e-4"),
-               FT_EFFORT_W=os.environ.get("FT_EFFORT_W", "2"))
+               FT_EFFORT_W=os.environ.get("FT_EFFORT_W", "2"),
+               # walls are there to be used (user, 2026-09-28): no wall penalty on the real board;
+               # the side-to-side tilting (1-2 Hz, ~5-6 direction reversals/s) -> more smoothness weight
+               FT_WALL_W=os.environ.get("FT_WALL_W", "0" if REAL_BOARD else "30"),
+               FT_JERK_W=os.environ.get("FT_JERK_W", "60"))
     r2 = subprocess.run([py, "finetune_track.py", policy, out, os.environ.get("LOOP_FT_ITERS", "200")], cwd=SIM,
                         env=env, capture_output=True, text=True)
     ft_last = [l for l in r2.stdout.splitlines() if l.startswith("{")][-1:] or [r2.stderr[-300:]]
