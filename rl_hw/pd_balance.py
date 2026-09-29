@@ -688,9 +688,22 @@ def main():
             lost_xy = None
             obs, info = env.reset()
             xb, yb = float(obs[0]), float(obs[1])
-            if reload_paused:                     # the ball is back (someone put it on the board)
-                auto_reload, reload_paused, reload_fails = True, False, 0
-                print("ball is back -- automatic reloads on again")
+            while reload_paused:
+                # the ball is back only if seen ON the board in most frames for 2 s (a one-frame
+                # detection flicker re-armed the elevator and cycled it again, 2026-09-29)
+                t_chk, n_ok, n_all = time.time(), 0, 0
+                while time.time() - t_chk < 2.0:
+                    env._write_action(np.zeros(2, dtype=np.float32))
+                    xr_, yr_, _, _, f_ = env._read_state()
+                    n_all += 1
+                    n_ok += int(f_ and abs(xr_) < env._x_half and abs(yr_) < env._y_half)
+                    time.sleep(0.03)
+                if n_all and n_ok / n_all > 0.8:
+                    auto_reload, reload_paused, reload_fails = True, False, 0
+                    print("ball is back -- automatic reloads on again")
+                else:
+                    obs, info = env.reset()           # keep waiting (level) for a real ball
+                    xb, yb = float(obs[0]), float(obs[1])
             if episode == 1 and holes and mode != "click":
                 set_target(*final_target[:6], why="start", from_xy=(xb, yb))   # first move routes round the hole
             if mode == "drop" and drop_left > 0 and holes:
