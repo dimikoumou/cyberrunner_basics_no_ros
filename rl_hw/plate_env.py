@@ -147,7 +147,7 @@ MOTOR_CAP_TICKS_MAX = 1200    # never more than this from level, whatever the me
 STALL_TICKS = 10 ** 9   # (tick-count stall guard disabled)
 STALL_GAIN_DEG = 0.3
 STALL_RETARGET_DEG = 2.0   # a new command (target moved this much) is a fresh attempt
-TICK_BOUNDS = {1: (1800, 3900), 3: (-500000, 500000)}  # m3 in extended position (multi-turn) mode since 2026-09-28: its level point drifts (~+900 ticks/h, 23500 -> 31769 overnight 2026-09-29; the old 40000 bound would have been hit); the camera angle guard + motor cap relative to the tracked level protect it
+TICK_BOUNDS = {1: (-500000, 500000), 3: (-500000, 500000)}  # m1 multi-turn too since 2026-09-29 (its level moved ~3000 ticks past its old 1800-3900 range);  # m3 in extended position (multi-turn) mode since 2026-09-28: its level point drifts (~+900 ticks/h, 23500 -> 31769 overnight 2026-09-29; the old 40000 bound would have been hit); the camera angle guard + motor cap relative to the tracked level protect it
 LEVEL_TOL_DEG = 0.4
 # Delay-aligned correction (research workflow 2026-09-26, Smith-predictor idea):
 # the camera tilt is 4 (alpha) / 5 (beta) steps old at the ~29 Hz loop (lag from
@@ -821,10 +821,28 @@ class HardwarePlateEnv(gym.Env):
         zero = np.zeros(2, dtype=np.float32)
         self._read_state()
         t0, ok = time.time(), 0
+        shifted = {k: 0 for k in DXL_IDS}
         while time.time() - t0 < max_s:
             self._write_action(zero)
             time.sleep(self.dt)
             self._read_state()
+            a, b = self._meas_tilt if self._meas_tilt is not None else (99.0, 99.0)
+            # the level point moved beyond the motor cap (2026-09-29: level ~3000 ticks from the
+            # startup position): while a motor sits at its cap and the camera (fresh pose) still
+            # sees that axis > 2 deg off level, move the cap's reference with it -- towards level,
+            # so the angle guard still bounds it; at most 8000 ticks per levelling
+            for i, dxl_id in enumerate(DXL_IDS):
+                lvl, cur = self._session_level.get(dxl_id), self._cmd_ticks.get(dxl_id)
+                if lvl is None or cur is None or not self._pose_ok or self._meas_tilt is None:
+                    continue
+                cap = min(abs(MOTOR_CAP_DEG * self._ticks_per_deg_measured(dxl_id, TICKS_PER_DEG[dxl_id])),
+                          MOTOR_CAP_TICKS_MAX)
+                off = (a, b)[i] - LEVEL_OFFSET_DEG[i]
+                if abs(cur - lvl) >= cap - 2 and abs(off) > 2.0 and shifted[dxl_id] < 8000:
+                    step = int(np.sign(cur - lvl)) * 100
+                    self._session_level[dxl_id] = lvl + step
+                    shifted[dxl_id] += 100
+                    t0 = min(t0 + self.dt, time.time())      # keep levelling while it moves
             a, b = self._meas_tilt if self._meas_tilt is not None else (99.0, 99.0)
             ok = ok + 1 if (abs(a - LEVEL_OFFSET_DEG[0]) < LEVEL_TOL_DEG
                             and abs(b - LEVEL_OFFSET_DEG[1]) < LEVEL_TOL_DEG) else 0
