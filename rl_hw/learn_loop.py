@@ -35,6 +35,9 @@ CTRL_LOG = os.environ.get("LOOP_CTRL_LOG", "/tmp/cyberrunner_ctrl.log")
 RUNS_PER_ROUND = int(os.environ.get("LOOP_RUNS", "30"))
 MAX_ROUND_S = float(os.environ.get("LOOP_MAX_ROUND_S", "1500"))
 URL = "http://localhost:8000"
+LOOP_TAG = time.strftime("%m%d_%H%M")
+GATE_RUNS = int(os.environ.get("LOOP_GATE_RUNS", "6"))
+GATE_FRAC = float(os.environ.get("LOOP_GATE_FRAC", "0.7"))
 
 
 def cmd(**c):
@@ -94,7 +97,15 @@ def controller_up():
         return False
 
 
-def drive_round(policy, real):
+def drive_round(policy, real, fallback=None, bar=None):
+    """fallback/bar: the previously accepted policy and its round mean -- if the new policy's
+    first GATE_RUNS runs average below GATE_FRAC * bar, it is rejected and the fallback drives
+    the rest of the round (round 1 on the real maze: 29 % -> 5 %, the refined policy tilted
+    to the motor caps -- it had exploited errors of a world model trained on one round)"""
+    return _drive_round(policy, real, fallback, bar)
+
+
+def _drive_round(policy, real, fallback, bar):
     # the controller keeps running between rounds; the new policy is swapped in by command
     # (restarting it every round froze the camera -- only (re)start it if it is not up)
     if not controller_up():
@@ -106,15 +117,24 @@ def drive_round(policy, real):
     time.sleep(1)
     cmd(cmd="maze_start", alternate=True, controller="odil")
     t0 = time.time()
+    rejected = False
     while True:
         time.sleep(10)
         R = runs_since(t0)
+        if (fallback and bar and not rejected and len(R) >= GATE_RUNS
+                and sum(r["progress"] for r in R[:GATE_RUNS]) / GATE_RUNS < GATE_FRAC * bar):
+            rejected = True
+            print(f"  new policy rejected after {GATE_RUNS} runs "
+                  f"({100 * sum(r['progress'] for r in R[:GATE_RUNS]) / GATE_RUNS:.0f} % vs {100 * bar:.0f} %) "
+                  f"-> back to {fallback}", flush=True)
+            cmd(cmd="track_policy", path=fallback)
+            t0 = time.time()                  # the round's runs = the fallback's runs from here
         if len(R) >= RUNS_PER_ROUND or time.time() - t0 > MAX_ROUND_S or os.path.exists(STOP):
             break
     cmd(cmd="maze_stop")
     cmd(cmd="stop")
     newest_log = max(glob.glob(os.path.join(HW, "pd_logs", "pd_*.csv")), key=os.path.getmtime)
-    return runs_since(t0), newest_log
+    return runs_since(t0), newest_log, rejected
 
 
 def train(round_no, policy, logs):
@@ -123,10 +143,13 @@ def train(round_no, policy, logs):
     env = dict(os.environ, WM_ITERS="400", WM_MAX_ROWS="150000", WM_THREADS="6")
     r1 = subprocess.run([py, "world_model.py", wm] + logs[-3:], cwd=SIM, env=env, capture_output=True, text=True)
     wm_msg = [l for l in r1.stdout.splitlines() if l.startswith(("before", "after", "physics"))]
-    out = f"odil_track_loop_r{round_no}"
+    out = f"odil_track_loop_{LOOP_TAG}_r{round_no}"          # a restarted loop never overwrites an earlier one
+    # small, careful steps (round 1: 600 iterations at lr 3e-4 without an effort penalty gave a
+    # policy that pushed to the motor caps): fewer iterations, lower rate, extra tilt penalised
     env = dict(os.environ, FT_WORLD=wm, FT_ROUTE=os.path.join(ROOT, "maze", "route.json"), FT_THREADS="6",
-               WM_DELAY=os.environ.get("WM_DELAY", "3"))
-    r2 = subprocess.run([py, "finetune_track.py", policy, out, os.environ.get("LOOP_FT_ITERS", "600")], cwd=SIM,
+               WM_DELAY=os.environ.get("WM_DELAY", "3"), FT_LR=os.environ.get("FT_LR", "1e-4"),
+               FT_EFFORT_W=os.environ.get("FT_EFFORT_W", "2"))
+    r2 = subprocess.run([py, "finetune_track.py", policy, out, os.environ.get("LOOP_FT_ITERS", "200")], cwd=SIM,
                         env=env, capture_output=True, text=True)
     ft_last = [l for l in r2.stdout.splitlines() if l.startswith("{")][-1:] or [r2.stderr[-300:]]
     new_policy = os.path.join(SIM, "runs", out, "odil_track_policy.npz")
@@ -138,17 +161,23 @@ def main():
     real = "--real" in sys.argv
     policy = os.environ.get("LOOP_POLICY", os.path.join(SIM, "runs", "odil_track_maze", "odil_track_policy.npz"))
     logs = []
+    accepted, bar = None, None            # last policy that held up on the rig, and its round mean
     for rnd in range(rounds):
         if os.path.exists(STOP):
             print("STOP file -- ending the loop")
             break
-        R, log = drive_round(policy, real)
+        R, log, rejected = drive_round(policy, real, accepted, bar)
         logs.append(log)
         p = [r["progress"] for r in R]
-        rec = {"t": time.time(), "round": rnd, "policy": policy, "real": real, "runs": len(R),
-               "mean_progress": sum(p) / len(p) if p else None, "best_progress": max(p) if p else None,
+        mean = sum(p) / len(p) if p else None
+        rec = {"t": time.time(), "round": rnd, "policy": policy, "real": real, "rejected": rejected,
+               "runs": len(R), "mean_progress": mean, "best_progress": max(p) if p else None,
                "finished": sum(r["result"] == "finished" for r in R), "log": log}
         print(json.dumps(rec), flush=True)
+        if rejected:
+            policy = accepted                 # train on from the policy that works
+        else:
+            accepted, bar = policy, mean
         policy, wm_msg, ft_last = train(rnd, policy, logs)
         rec.update(world_model=wm_msg, refine=ft_last, next_policy=policy)
         with open(LOOP_LOG, "a") as f:
