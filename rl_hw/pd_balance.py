@@ -1320,9 +1320,22 @@ def main():
                             ang = np.radians((0.0, 50.0, -50.0)[(run_jolts - 1) % 3])
                             d = np.array([d[0] * np.cos(ang) - d[1] * np.sin(ang),
                                           d[0] * np.sin(ang) + d[1] * np.cos(ang)], dtype=np.float32)
-                            print(f"  maze: run stalled at ({xb * 1000:.0f}, {yb * 1000:.0f}) mm -- jolt {run_jolts}/3")
-                            env._hold_tilt(-0.4 * d, 0.3)
-                            env._hold_tilt(1.0 * d, 0.6)
+                            back, amp = 0.4, 1.0
+                            if maze is not None and maze.holes:
+                                # near a real hole (2026-09-28: 5 of 6 falls into hole 35 came 2-3 s after
+                                # a jolt of a ball resting at its lip): nothing towards the hole -- no
+                                # tilt-back, the hole-ward part of the push removed, a softer push
+                                hc, hr = min(maze.holes, key=lambda h_: np.hypot(*(h_[0] - pos)) - h_[1])
+                                if np.hypot(*(hc - pos)) - hr < 0.012:
+                                    to_h = (hc - pos) / max(np.hypot(*(hc - pos)), 1e-6)
+                                    d = d - max(0.0, float(d @ to_h)) * to_h
+                                    d = (d / max(np.hypot(*d), 1e-6)).astype(np.float32)
+                                    back, amp = 0.0, 0.7
+                            print(f"  maze: run stalled at ({xb * 1000:.0f}, {yb * 1000:.0f}) mm -- jolt {run_jolts}/3"
+                                  + (" (near a hole: soft, away from it)" if back == 0.0 else ""))
+                            if back:
+                                env._hold_tilt(-back * d, 0.3)
+                            env._hold_tilt(amp * d, 0.6)
                             run_still_t = None
                 elif track_ctrl is not None:
                     track_ctrl.reset()          # fresh observer / integral for the next line
