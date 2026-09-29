@@ -42,7 +42,7 @@ from rl_policy import RigPolicyController, ODILRigController, ODILFrictionCompRi
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "rl_sim")))
 from odil_track import TrackPolicy  # noqa: E402  (numpy only)
 MAZE_REAL = os.environ.get("PD_MAZE_REAL") == "1"   # the real maze board (walls, real holes)
-MAZE_GAIN = float(os.environ.get("PD_MAZE_GAIN", "0.7"))   # ODIL tracker output scale in the maze
+MAZE_GAIN = float(os.environ.get("PD_MAZE_GAIN", "1.0"))   # ODIL tracker output scale in the maze
 from elevator import Elevator  # noqa: E402
 from hole import detect_holes_stable, save_holes, near_hole, detour, HOLE_MARGIN_M  # noqa: E402
 from plate_env import LEVEL_OFFSET_DEG  # noqa: E402
@@ -926,6 +926,12 @@ def main():
                                 running = True
                             except (OSError, ValueError, KeyError) as err:
                                 ui.set_state(maze_msg=f"maze route not available: {err}")
+                        elif kind == "maze_gain":
+                            # change the maze tracker gain without a restart (restarts froze the camera)
+                            global MAZE_GAIN
+                            MAZE_GAIN = float(c.get("gain", MAZE_GAIN))
+                            os.environ["PD_MAZE_GAIN"] = str(MAZE_GAIN)      # recorded with each maze run
+                            print(f"maze tracker gain set to {MAZE_GAIN}")
                         elif kind == "track_policy":
                             # swap the ODIL tracking policy without a restart (learn_loop.py: a
                             # controller restart per round froze the camera, 2026-09-28)

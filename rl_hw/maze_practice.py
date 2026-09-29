@@ -178,7 +178,7 @@ class MazePractice:
                       f"(now x{self.slow[self.ctl][c]:.2f})")
         rec = {"t": time.time(), "run": self.run_no, "controller": self.ctl, "learn": LEARN, "real": REAL,
                "policy": os.environ.get("PD_ODIL_TRACK", "default"), "result": result,
-               "progress": progress, "retries": getattr(self, "retries", 0), "gain": float(os.environ.get("PD_MAZE_GAIN", "0.7")), "duration_s": time.time() - self.t0, "jerk": jerk, **acc}
+               "progress": progress, "retries": getattr(self, "retries", 0), "gain": float(os.environ.get("PD_MAZE_GAIN", "1.0")), "duration_s": time.time() - self.t0, "jerk": jerk, **acc}
         os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
         with open(LOG_PATH, "a") as f:
             f.write(json.dumps(rec) + "\n")
