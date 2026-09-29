@@ -78,12 +78,29 @@ def detect_holes_stable(env, n_frames=8):
             else:
                 groups.append([h])
     out = []
+    false_c = [np.asarray(q["center"], float) for q in load_false_holes()]
     for g in groups:
+        c_ = np.mean([h["center"] for h in g], axis=0)
+        if any(np.hypot(*(c_ - q)) < FALSE_HOLE_M for q in false_c):
+            continue                               # marked as not a hole (bar ends, 2026-09-29)
         if len(g) >= max(2, len(seen) // 2):
             out.append({"center": tuple(np.mean([h["center"] for h in g], axis=0)),
                         "radius": float(np.median([h["radius"] for h in g])),
                         "px": tuple(np.mean([h["px"] for h in g], axis=0))})
     return out
+
+
+FALSE_HOLES_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "maze", "false_holes.json"))
+FALSE_HOLE_M = 0.006          # a detection this close to a marked false hole is dropped
+
+
+def load_false_holes(path=FALSE_HOLES_PATH):
+    """spots marked as NOT holes (e.g. dark round bar ends the detector takes for holes)"""
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return []
 
 
 def save_holes(holes, path=HOLES_PATH):
