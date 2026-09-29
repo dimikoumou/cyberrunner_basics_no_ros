@@ -42,6 +42,7 @@ from rl_policy import RigPolicyController, ODILRigController, ODILFrictionCompRi
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "rl_sim")))
 from odil_track import TrackPolicy  # noqa: E402  (numpy only)
 MAZE_REAL = os.environ.get("PD_MAZE_REAL") == "1"   # the real maze board (walls, real holes)
+MAZE_GAIN = float(os.environ.get("PD_MAZE_GAIN", "0.7"))   # ODIL tracker output scale in the maze
 from elevator import Elevator  # noqa: E402
 from hole import detect_holes_stable, save_holes, near_hole, detour, HOLE_MARGIN_M  # noqa: E402
 from plate_env import LEVEL_OFFSET_DEG  # noqa: E402
@@ -1101,13 +1102,12 @@ def main():
                             maze_following = True
                             result = maze.step((xb, yb), True)
                             if maze.retry_req:
-                                # stuck 15 s (real maze): back the reference up 2 cm so the ball rolls
-                                # back and takes the spot again with some speed; fresh jolts
+                                # stuck 15 s (real maze): keep going FORWARD -- fresh jolts at this spot
+                                # (the ball never moves back along the route; user, 2026-09-28)
                                 maze.retry_req = False
-                                follower.s, follower.v = max(0.0, follower.s - 0.02), 0.0
-                                run_still_t, run_jolts = None, 0
+                                run_still_t, run_jolts, run_jolt_at = None, 0, None
                                 print(f"  maze: stuck at ({xb * 1000:.0f}, {yb * 1000:.0f}) mm -- retry {maze.retries} "
-                                      f"(back 2 cm, then again)")
+                                      f"(fresh jolts, forward only)")
                                 if maze.retries == 10:
                                     _alert(f"maze: ball stuck at x={xb * 1000:.0f} y={yb * 1000:.0f} mm, 10 retries so far")
                         if result:
@@ -1281,6 +1281,10 @@ def main():
                     action = np.clip(np.asarray(a_line, dtype=np.float32), -0.8, 0.8)
                     if use_odil and track_ctrl is not None:
                         a_odil = np.asarray(track_ctrl(line_ref, pos, vel, dt_real if dt_real > 0 else None), dtype=np.float32)
+                        if mode == "maze":
+                            # gentler in the maze (2026-09-28): the tilt swung side to side at 1-2 Hz
+                            # (~5-6 direction reversals/s) -- too much loop gain for the camera->motor delay
+                            a_odil = MAZE_GAIN * a_odil
                         if mode == "maze" and maze_blend:
                             a_odil = 0.5 * a_odil + 0.5 * np.asarray(a_line, dtype=np.float32)   # ODIL + classic
                         # the same breakaway boost as the classic line law, in full: a ball stuck on the
