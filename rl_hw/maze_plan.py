@@ -28,6 +28,8 @@ BALL_R = 0.0040                    # ball centre keeps this from a wall (the bal
                                    # little under its radius: extracted walls are slightly fat)
 HOLE_SCALE = 0.005                 # m: how fast the hole cost falls off with distance to the edge
 HOLE_W = 8.0                       # a step right at a hole's edge costs 1 + HOLE_W times more
+WALL_W = 4.0                       # soft cost for a target the ball can't reach (closer than REACH_R)
+REACH_R = 0.0062                   # m: ball radius -- a centre closer to a wall than this is unreachable
 SMOOTH_PASSES = 25                 # moving-average passes (a wiggly reference makes the ball wiggle)
 HOLE_FORBID = 0.0                  # centre may not come closer than this to a hole's edge
 
@@ -74,6 +76,9 @@ def plan(route_json, start=None, goal=None, corridor=None):
         d_line = cv2.distanceTransform((1 - line).astype(np.uint8), cv2.DIST_L2, 5) * CELL
         blocked |= d_line > corridor
     cost = 1.0 + HOLE_W * np.exp(-np.maximum(d_hole, 0.0) / HOLE_SCALE)
+    # the target must be where the ball's centre CAN be: prefer >= REACH_R from a wall (the ball
+    # radius; the first safe route ran 2.8 mm from walls and the ball, pushed off it, fell early)
+    cost += WALL_W * np.exp(-np.maximum(free_d - BALL_R, 0.0) / 0.0015) * (free_d < REACH_R)
     si, sj = to_ij(start)[::-1], to_ij(goal)[::-1]
     for (i, j) in (si, sj):                       # start/goal must be free: snap to the nearest free cell
         if blocked[i, j]:
@@ -115,7 +120,10 @@ def plan(route_json, start=None, goal=None, corridor=None):
     for _ in range(SMOOTH_PASSES):
         Q = P.copy()
         Q[2:-2] = (P[:-4] + P[1:-3] + P[2:-2] + P[3:-1] + P[4:]) / 5
-        ok = np.array([not blocked[to_ij(q)[1], to_ij(q)[0]] for q in Q])
+        # a smoothed point may not cut closer to a wall than the point it replaces
+        ok = np.array([not blocked[to_ij(q)[1], to_ij(q)[0]]
+                       and free_d[to_ij(q)[1], to_ij(q)[0]] >= min(REACH_R, free_d[to_ij(p)[1], to_ij(p)[0]]) - 0.0005
+                       for q, p in zip(Q, P)])
         P = np.where(ok[:, None], Q, P)
     s = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(P, axis=0).T))])
     n = int(s[-1] / 0.001) + 1
