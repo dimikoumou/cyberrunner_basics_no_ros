@@ -484,8 +484,37 @@ class Detector:
                 mask, 4, self.q_ball, self.th_ball, show_sub=self.show_subimages
             )
             if found:
-                return (ul + c_local).astype("float32"), True
+                c = (ul + c_local).astype("float32")
+                if self._on_board(c):
+                    return c, True
+                # found OFF the board (2026-09-29: the tracker locked onto a ball-coloured spot in
+                # the elevator bracket above the board while the real ball rolled on the board):
+                # a ball ON the board always wins; the off-board spot only if there is none
+                cb, fb = self._detect_on_board(frame)
+                return (cb, True) if fb else (c, True)
         return c, False
+
+    def _board_hull(self):
+        if self.corners is None or not np.all(np.isfinite(self.corners)):
+            return None
+        pts = np.asarray(self.corners, dtype=np.float32)[:, ::-1]          # (row, col) -> (x, y)
+        ctr = pts.mean(axis=0)
+        return cv2.convexHull(((pts - ctr) * 1.06 + ctr).astype(np.float32))
+
+    def _on_board(self, rc):
+        hull = self._board_hull()
+        return hull is None or cv2.pointPolygonTest(hull, (float(rc[1]), float(rc[0])), False) >= 0
+
+    def _detect_on_board(self, frame):
+        hull = self._board_hull()
+        if hull is None:
+            return np.array([0.0, 0.0]), False
+        _, mask = mask_hsv(frame, self.hsv_params_ball)
+        board = np.zeros(mask.shape[:2], np.uint8)
+        cv2.fillConvexPoly(board, hull.astype(np.int32), 1)
+        mask = (mask * board).astype(mask.dtype)
+        c_local, found = detect_gaussian(mask, 4, self.q_ball, self.th_ball, show_sub=False)
+        return np.asarray(c_local, dtype="float32"), found
 
     def draw_corners(self, frame: np.ndarray):
         for i in range(self.corners.shape[0]):
