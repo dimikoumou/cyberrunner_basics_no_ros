@@ -42,6 +42,7 @@ from rl_policy import RigPolicyController, ODILRigController, ODILFrictionCompRi
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "rl_sim")))
 from odil_track import TrackPolicy  # noqa: E402  (numpy only)
 MAZE_REAL = os.environ.get("PD_MAZE_REAL") == "1"   # the real maze board (walls, real holes)
+VCAP_GAIN = float(os.environ.get("PD_MAZE_VCAP_GAIN", "10"))   # action per m/s above the speed cap
 MAZE_GAIN = float(os.environ.get("PD_MAZE_GAIN", "1.0"))   # ODIL tracker output scale in the maze
 from elevator import Elevator  # noqa: E402
 from hole import detect_holes_stable, save_holes, near_hole, detour, HOLE_MARGIN_M  # noqa: E402
@@ -1308,6 +1309,12 @@ def main():
                         # paper behind the reference stayed there (the ODIL tracker has no stiction term)
                         a_odil = a_odil + (1.0 if not (mode == "maze" and maze_blend) else 0.5) * line_boost * bst
                         action = np.clip(a_odil, -0.8, 0.8)
+                    if mode == "maze" and maze is not None and getattr(maze, "vcap", 0.0) > 0:
+                        # speed governor (2026-09-29): falls came at 50-70 mm/s, 2-3x the reference
+                        # speed -- above the cap, brake against the ball's motion
+                        sp_ = float(np.hypot(*vel))
+                        if sp_ > maze.vcap:
+                            action = np.clip(action - VCAP_GAIN * (sp_ - maze.vcap) * vel / sp_, -0.8, 0.8).astype(np.float32)
                     if mode == "maze" and maze_following:
                         # real maze (2026-09-28): the ball sat still at a wall end at ~4 deg for the
                         # whole 15 s stall timeout. After 4 s still, tilt back briefly and snap to

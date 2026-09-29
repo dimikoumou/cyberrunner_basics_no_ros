@@ -13,6 +13,7 @@ import glob
 import json
 import os
 import sys
+import time
 from collections import defaultdict
 
 import numpy as np
@@ -67,6 +68,54 @@ def falls_in(fn, holes, route):
     return out
 
 
+def falls_from_runs(files, holes, route):
+    """falls anchored on the run log (phase3_logs/maze_runs.jsonl): every run that ended in a real
+    hole -> the last frames the ball was seen before that moment, in the log covering it"""
+    runs = [json.loads(l) for l in open(os.path.join(ROOT, "phase3_logs", "maze_runs.jsonl"))]
+    runs = [r for r in runs if r.get("real") and "real hole" in r.get("result", "")]
+    logs = []
+    for fn in files:
+        rows = list(csv.DictReader(open(fn)))
+        if rows:
+            # log times are seconds since the log started; its start is in the name (local time)
+            t0 = time.mktime(time.strptime(os.path.basename(fn)[3:18], "%Y%m%d_%H%M%S"))
+            for q in rows:
+                q["t"] = str(t0 + float(q["t"]))
+            logs.append((float(rows[0]["t"]), float(rows[-1]["t"]), fn, rows))
+    out = []
+    g = lambda q, k: float(q[k]) if q.get(k) not in (None, "", "nan") else np.nan
+    for run in runs:
+        L = [x for x in logs if x[0] <= run["t"] <= x[1] + 5]
+        if not L:
+            continue
+        rows = L[0][3]
+        t = np.array([g(q, "t") for q in rows])
+        found = np.array([g(q, "ball_found") for q in rows])
+        i = int(np.searchsorted(t, run["t"]))
+        j = i - 1
+        while j > 0 and found[j] != 1:          # last frame the ball was seen
+            j -= 1
+        w = np.arange(max(0, j - 60), j + 1)
+        w = w[found[w] == 1]
+        P = np.column_stack([[g(rows[k], "xb") for k in w], [g(rows[k], "yb") for k in w]])
+        tw = t[w]
+        if len(P) < 5 or not np.all(np.isfinite(P[-1])):
+            continue
+        p = P[-1]
+        edge = [np.hypot(*(p - c)) - r for c, r in holes]
+        k = int(np.argmin(edge))
+        v = np.diff(P, axis=0) / np.maximum(np.diff(tw), 1e-3)[:, None]
+        speed = float(np.median(np.hypot(*v[-8:].T)))
+        moved = float(np.hypot(*(P[-1] - P[max(0, len(P) - 30)])))
+        off = float(np.min(np.hypot(*(route - p).T)))
+        out.append({"t": run["t"], "run": run.get("run"), "route": run.get("route", "route"), "hole": k,
+                    "edge_mm": 1000 * edge[k], "progress": run["progress"], "speed_mm_s": 1000 * speed,
+                    "moved_last_1s_mm": 1000 * moved, "off_route_mm": 1000 * off,
+                    "kind": ("resting at the lip" if moved < 0.004 else
+                             "fast into it" if speed > 0.03 else "drifted in")})
+    return out
+
+
 def main():
     r = json.load(open(ROUTE))
     holes = [(np.array(h["center"]), float(h["radius"])) for h in r["holes"]]
@@ -74,9 +123,7 @@ def main():
     t_route = os.path.getmtime(ROUTE)
     files = sys.argv[1:] or [f for f in sorted(glob.glob(os.path.join(os.path.dirname(__file__), "pd_logs", "pd_*.csv")))
                              if os.path.getmtime(f) > t_route]
-    F = []
-    for fn in files:
-        F += falls_in(fn, holes, route)
+    F = falls_from_runs(files, holes, route)
     by = defaultdict(list)
     for f in F:
         by[f["hole"]].append(f)

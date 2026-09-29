@@ -27,6 +27,9 @@ ILC_MAX = 0.008              # m, never shift the reference further than this (1
 LOS_TOL_M = float(os.environ.get("PD_MAZE_LOS_MM", "3")) / 1000   # target stays in sight (no corner cutting)
 MAZE_SPEED = float(os.environ.get("PD_MAZE_SPEED", "0.025"))
 STALL_S = 15.0
+# ball speed limits to alternate (mm/s, 0 = off): above it the controller brakes against the
+# ball's motion. Falls on the real maze came at 50-70 mm/s, 2-3x the reference speed.
+VCAPS = [float(v) for v in os.environ.get("PD_MAZE_VCAPS", "0").split(",")]
 LEARN = os.environ.get("PD_MAZE_LEARN", "1") == "1"   # 0: no ILC / slow zones (diagnostic baseline)
 # the real maze board: holes and walls are physical -- a fall is the ball disappearing (the
 # controller then reloads it), walls may be leaned on; only the stall timeout is checked here
@@ -102,6 +105,7 @@ class MazePractice:
     def start_run(self, ctl, tracker_cls, ball_xy):
         self.ctl = ctl
         self._use(self.run_no % len(self.routes))
+        self.vcap = VCAPS[(self.run_no // len(self.routes)) % len(VCAPS)] / 1000.0   # route x vcap cycle
         self.run_no += 1
         self.t0 = time.time()
         self.samples = []                              # (route index, ball xy)
@@ -196,7 +200,7 @@ class MazePractice:
                       f"(now x{self.slow[self.ctl][c]:.2f})")
         rec = {"t": time.time(), "run": self.run_no, "controller": self.ctl, "learn": LEARN, "real": REAL,
                "policy": os.environ.get("PD_ODIL_TRACK", "default"), "result": result,
-               "progress": progress, "retries": getattr(self, "retries", 0), "gain": float(os.environ.get("PD_MAZE_GAIN", "1.0")), "fall_xy": getattr(self, "fall_xy", None), "route": self.route_name, "duration_s": time.time() - self.t0, "jerk": jerk, **acc}
+               "progress": progress, "retries": getattr(self, "retries", 0), "gain": float(os.environ.get("PD_MAZE_GAIN", "1.0")), "fall_xy": getattr(self, "fall_xy", None), "route": self.route_name, "vcap_mm_s": 1000 * getattr(self, "vcap", 0.0), "duration_s": time.time() - self.t0, "jerk": jerk, **acc}
         os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
         with open(LOG_PATH, "a") as f:
             f.write(json.dumps(rec) + "\n")
