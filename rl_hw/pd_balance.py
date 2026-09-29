@@ -1303,7 +1303,13 @@ def main():
                             run_jolt_at = pos.copy()
                             run_jolts += 1
                             d = line_ref["p"] - pos
-                            d = (d / max(np.hypot(*d), 1e-6)).astype(np.float32)
+                            d = d / max(np.hypot(*d), 1e-6)
+                            # 1st straight at the reference, then 50 deg to either side: a ball
+                            # resting against a wall end was pressed back onto it by every straight
+                            # jolt (stuck at -128, 9 through 4 retries, 2026-09-28)
+                            ang = np.radians((0.0, 50.0, -50.0)[(run_jolts - 1) % 3])
+                            d = np.array([d[0] * np.cos(ang) - d[1] * np.sin(ang),
+                                          d[0] * np.sin(ang) + d[1] * np.cos(ang)], dtype=np.float32)
                             print(f"  maze: run stalled at ({xb * 1000:.0f}, {yb * 1000:.0f}) mm -- jolt {run_jolts}/3")
                             env._hold_tilt(-0.4 * d, 0.3)
                             env._hold_tilt(1.0 * d, 0.6)
