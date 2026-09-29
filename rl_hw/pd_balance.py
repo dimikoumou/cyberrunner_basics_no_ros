@@ -595,6 +595,7 @@ def main():
     maze_join_best, maze_join_t, maze_join_alerted, maze_jolts = None, 0.0, False, 0
     maze_back_wp = None                       # real maze: next waypoint back along the route
     run_jolt_at = None
+    last_seen_xy = None
     run_still_t, run_jolts = None, 0          # ball stopped mid-run (real maze): jolt it free
     maze_detour, maze_detoured = None, False
     relevel_times = []
@@ -1440,6 +1441,8 @@ def main():
                 # step()'s not-found grace frames obs holds the frozen last position.
                 ball_found = bool(info.get("ball_found", True))
                 last_found = ball_found
+                if ball_found:
+                    last_seen_xy = np.array([obs[0], obs[1]], dtype=float)
                 track_lost(ball_found)
                 if mode in ("line", "path", "maze") and follower is not None:
                     in_circle = ball_found and line_off is not None and line_off < LINE_TOL * 1.25
@@ -1454,9 +1457,13 @@ def main():
                     if mode == "maze" and maze is not None and maze.active and maze_following:
                         # the real maze: the ball fell through a hole -> the run ends here; the
                         # reload brings it back and the next run starts from the start
+                        # label by the last position the ball was SEEN (env._prev_ball could be stale:
+                        # several falls at 32 % were labelled "hole 0", 5 cm off)
                         k_ = None
+                        fall_xy = last_seen_xy if last_seen_xy is not None else lost_xy
                         if maze.holes:
-                            k_ = int(np.argmin([np.hypot(*(lost_xy - c)) for c, _ in maze.holes]))
+                            k_ = int(np.argmin([np.hypot(*(fall_xy - c)) - r for c, r in maze.holes]))
+                        maze.fall_xy = [float(fall_xy[0]), float(fall_xy[1])]
                         print("maze:", maze.end_run(f"fell into a real hole (near {k_})",
                                                     (jerk_sum - draw_j0[0]) / max(1, jerk_n - draw_j0[1])))
                         maze_following = False

@@ -36,8 +36,17 @@ CONTROLLERS = tuple(os.environ.get("PD_MAZE_CONTROLLERS", "odil,blend").split(",
 
 class MazePractice:
     def __init__(self, env, plate_to_pixel):
-        r = json.load(open(ROUTE_PATH))
+        # several routes (PD_MAZE_ROUTES, comma-separated route files) alternate run by run -- a
+        # fair A/B (e.g. the printed line vs the planned safe route) under the same conditions
+        paths = [p for p in os.environ.get("PD_MAZE_ROUTES", ROUTE_PATH).split(",") if p]
+        self.routes = []
+        for p in paths:
+            rr = json.load(open(p))
+            self.routes.append({"name": os.path.splitext(os.path.basename(p))[0],
+                                "route": np.array(rr["route_m"], dtype=float), "L": float(rr["length_m"])})
+        r = json.load(open(paths[0]))
         self.route = np.array(r["route_m"], dtype=float)
+        self.route_name = self.routes[0]["name"]
         self.holes = [(np.array(h["center"]), float(h["radius"])) for h in r["holes"]]
         self.walls = [(np.array(w, dtype=float) * 1e4).astype(np.float32) for w in r.get("walls_m", [])]
         self.L = float(r["length_m"])
@@ -57,19 +66,26 @@ class MazePractice:
         self._pixels(env, plate_to_pixel)
         self.active = False
 
+    def _use(self, i):
+        """make route i the current one (route, length, count, live-view pixels)"""
+        R = self.routes[i]
+        self.route, self.L, self.n, self.route_name = R["route"], R["L"], len(R["route"]), R["name"]
+        self.route_px, self.route_px_idx = R["px"], R["px_idx"]
+
     def _pixels(self, env, p2p):
         """route / holes / walls in image pixels (level plate) for the live view"""
         def px(q, guess=None):
             rc = p2p(env, q, guess=guess) if guess is not None else p2p(env, q)
             return None if rc is None else (float(rc[1]), float(rc[0]))
-        pts, g = [], (180.0, 320.0)
-        for q in self.route[::4]:
-            rc = p2p(env, q, guess=g)
-            if rc is not None:
-                g = rc
-                pts.append((float(rc[1]), float(rc[0])))
-        self.route_px = np.array(pts)
-        self.route_px_idx = np.arange(0, self.n, 4)[:len(pts)]
+        for R in self.routes:
+            pts, g = [], (180.0, 320.0)
+            for q in R["route"][::4]:
+                rc = p2p(env, q, guess=g)
+                if rc is not None:
+                    g = rc
+                    pts.append((float(rc[1]), float(rc[0])))
+            R["px"], R["px_idx"] = np.array(pts), np.arange(0, len(R["route"]), 4)[:len(pts)]
+        self._use(0)
         self.holes_px = []
         for c, r in self.holes:
             a, b = px(c), px((c[0] + r, c[1]))
@@ -85,15 +101,17 @@ class MazePractice:
     # ------------------------------------------------------------------ a run
     def start_run(self, ctl, tracker_cls, ball_xy):
         self.ctl = ctl
+        self._use(self.run_no % len(self.routes))
         self.run_no += 1
         self.t0 = time.time()
         self.samples = []                              # (route index, ball xy)
         self.max_idx = 0
         self.t_progress = None
         self.retries, self.retry_req = 0, False
+        self.fall_xy = None
         self.follower = tracker_cls(self.route, False, np.asarray(ball_xy), keep_direction=True, v=MAZE_SPEED,
-                                    ref_offset=self.ilc[ctl] if LEARN else None,
-                                    speed_scale=self.slow[ctl] if LEARN else None,
+                                    ref_offset=self.ilc[ctl] if LEARN and len(self.ilc[ctl]) == self.n else None,
+                                    speed_scale=self.slow[ctl] if LEARN and len(self.slow[ctl]) == self.n else None,
                                     los_tol=LOS_TOL_M)
         self.active = True
         return self.follower
@@ -178,7 +196,7 @@ class MazePractice:
                       f"(now x{self.slow[self.ctl][c]:.2f})")
         rec = {"t": time.time(), "run": self.run_no, "controller": self.ctl, "learn": LEARN, "real": REAL,
                "policy": os.environ.get("PD_ODIL_TRACK", "default"), "result": result,
-               "progress": progress, "retries": getattr(self, "retries", 0), "gain": float(os.environ.get("PD_MAZE_GAIN", "1.0")), "duration_s": time.time() - self.t0, "jerk": jerk, **acc}
+               "progress": progress, "retries": getattr(self, "retries", 0), "gain": float(os.environ.get("PD_MAZE_GAIN", "1.0")), "fall_xy": getattr(self, "fall_xy", None), "route": self.route_name, "duration_s": time.time() - self.t0, "jerk": jerk, **acc}
         os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
         with open(LOG_PATH, "a") as f:
             f.write(json.dumps(rec) + "\n")
