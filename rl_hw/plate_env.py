@@ -646,6 +646,10 @@ class HardwarePlateEnv(gym.Env):
         """Returns (xb, yb, alpha, beta, ball_found)."""
         frame = self._grab_frame()
         if frame is None:
+            # no (new) frame: there is no measured tilt -- the servo must not correct on the
+            # 0.0 returned here (2026-09-28: with a frozen camera the wait-for-ball level loop
+            # kept "correcting" towards level and drove motor 3 ~9000 ticks and motor 1 to its bound)
+            self._pose_ok = False
             return np.nan, np.nan, 0.0, 0.0, False
         try:
             _, _, inputs, xb, yb = self.pipeline.estimate(frame)
@@ -658,6 +662,7 @@ class HardwarePlateEnv(gym.Env):
                     print(f"[HardwarePlateEnv] frame callback error: {e}")
         except Exception as e:
             print(f"[HardwarePlateEnv] estimate() failed on this frame, skipping: {e}")
+            self._pose_ok = False
             return np.nan, np.nan, 0.0, 0.0, False
         alpha, beta = inputs
         ball_found = not (np.isnan(xb) or np.isnan(yb))
