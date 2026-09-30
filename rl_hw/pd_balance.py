@@ -231,7 +231,7 @@ GOAL = (-0.0078, 0.0060)
 # reloaded by the elevator (motor 2) and the task continues
 VIA_R = 0.012                          # target radius of a via point round a hole
 VIA_REACH = 0.02                       # this close to a via point -> head for the next one
-RELOAD_TIMEOUT_S = 60.0                # ball lost: elevator runs until the ball is seen again, at most 60 s (user)
+RELOAD_TIMEOUT_S = 15.0   # elevator run per reload (user 2026-09-29: just run it 15 s, no tilt)
 RELOAD_UNITS = int(os.environ.get("PD_RELOAD_UNITS", "328"))      # elevator speed for a reload (~75 rpm)
 RELOAD_SEEN_FRAMES = 5                 # ball visible on the paper this many frames in a row = reloaded
 GOAL_TOLERANCE = 0.0455
