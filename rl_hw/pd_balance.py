@@ -1456,8 +1456,10 @@ def main():
                     env._capped_steps = {}
                     relevel_times = [t_ for t_ in relevel_times if time.time() - t_ < 300] + [time.time()]
                     print(f"  motor {mid} at its cap without the angle moving -> re-levelling ({len(relevel_times)}/3 in 5 min)")
+                    # _servo_level moves the cap reference only when the camera confirms level; this
+                    # used to re-centre it on the capped motor unconditionally, so each re-level
+                    # walked the cap ~1200 ticks further (2026-09-29 runaway to -29 deg, overload)
                     env._servo_level(max_s=6.0)
-                    env._session_level = {k: int(v) for k, v in env._cmd_ticks.items()}
                     if maze is not None and maze.active and mode == "maze":
                         maze.end_run("re-levelled")
                         follower = maze.start_run(maze.ctl, PathTracker, (xb, yb))
