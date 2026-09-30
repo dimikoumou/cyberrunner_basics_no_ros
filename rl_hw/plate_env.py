@@ -33,7 +33,7 @@ os.chdir(STATE_EST_DIR)
 from estimation_pipeline import EstimationPipeline  # noqa: E402
 from divers import init_capture  # noqa: E402
 import state_est_control  # noqa: E402
-from state_est_control import init_dynamixel, set_position, ADDR_TORQUE_ENABLE  # noqa: E402
+from state_est_control import init_dynamixel, set_position, read_motor_positions, ADDR_TORQUE_ENABLE  # noqa: E402
 
 # state_est_control.DXL_IDS = [1, 2] is wrong for tilt control: confirmed 2026-08-26
 # that ID 2 is the unrelated ball-reload elevator motor (it never moved the plate --
@@ -382,16 +382,15 @@ class HardwarePlateEnv(gym.Env):
         # static calibration center for motor3 (2476) is ~1400 ticks off level
         # since the homing-offset change, i.e. a hard tilt that rolls the ball
         # straight into a corner before the first episode even starts.
-        startup = {dxl_id: c for dxl_id, (_, c, _) in self.calibration.items()}
-        try:
-            with open(LAST_LEVEL_CACHE_PATH) as f:
-                cached = json.load(f)
-            m1_id, m3_id = sorted(self.calibration.keys())
-            startup[m1_id], startup[m3_id] = int(cached["m1"]), int(cached["m3"])
-        except (OSError, KeyError, ValueError):
-            pass
-        if os.environ.get("PLATE_OPEN_LOOP_LEVEL") == "1":
-            startup.update(LEVEL_TICKS)          # the fixed, measured level position
+        # 2026-09-29 (user: "never do that again"): start where the motors ARE. Driving to a
+        # cached "last level" position undid a plate the user had just levelled by hand (the
+        # cache held positions written during a runaway). Levelling then goes from here, on
+        # the camera, inside the motor cap around this position.
+        present = read_motor_positions(self.port_handler, self.packet_handler, list(self.calibration.keys()))
+        startup = {dxl_id: int(p) for dxl_id, p in present.items() if p is not None}
+        if len(startup) != len(self.calibration):
+            raise RuntimeError(f"HardwarePlateEnv: could not read the motor positions at startup ({present}) "
+                               f"-- not moving the plate")
         for dxl_id, target in startup.items():
             set_position(self.port_handler, self.packet_handler, dxl_id, target)
             self._cmd_ticks[dxl_id] = int(target)
