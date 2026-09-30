@@ -821,28 +821,10 @@ class HardwarePlateEnv(gym.Env):
         zero = np.zeros(2, dtype=np.float32)
         self._read_state()
         t0, ok = time.time(), 0
-        shifted = {k: 0 for k in DXL_IDS}
         while time.time() - t0 < max_s:
             self._write_action(zero)
             time.sleep(self.dt)
             self._read_state()
-            a, b = self._meas_tilt if self._meas_tilt is not None else (99.0, 99.0)
-            # the level point moved beyond the motor cap (2026-09-29: level ~3000 ticks from the
-            # startup position): while a motor sits at its cap and the camera (fresh pose) still
-            # sees that axis > 2 deg off level, move the cap's reference with it -- towards level,
-            # so the angle guard still bounds it; at most 8000 ticks per levelling
-            for i, dxl_id in enumerate(DXL_IDS):
-                lvl, cur = self._session_level.get(dxl_id), self._cmd_ticks.get(dxl_id)
-                if lvl is None or cur is None or not self._pose_ok or self._meas_tilt is None:
-                    continue
-                cap = min(abs(MOTOR_CAP_DEG * self._ticks_per_deg_measured(dxl_id, TICKS_PER_DEG[dxl_id])),
-                          MOTOR_CAP_TICKS_MAX)
-                off = (a, b)[i] - LEVEL_OFFSET_DEG[i]
-                if abs(cur - lvl) >= cap - 2 and abs(off) > 2.0 and shifted[dxl_id] < 8000:
-                    step = int(np.sign(cur - lvl)) * 100
-                    self._session_level[dxl_id] = lvl + step
-                    shifted[dxl_id] += 100
-                    t0 = min(t0 + self.dt, time.time())      # keep levelling while it moves
             a, b = self._meas_tilt if self._meas_tilt is not None else (99.0, 99.0)
             ok = ok + 1 if (abs(a - LEVEL_OFFSET_DEG[0]) < LEVEL_TOL_DEG
                             and abs(b - LEVEL_OFFSET_DEG[1]) < LEVEL_TOL_DEG) else 0
