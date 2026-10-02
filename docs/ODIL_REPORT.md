@@ -111,6 +111,9 @@ both off ("learning off") ODIL averaged about 33 %, best 98 %.**
   `run_20260929_113642_odil_100pct.mp4`); runs >= 70 % are recorded automatically
   (`rl_hw/run_recorder.py`). In the first finish the ball stayed 2.4 mm (median) / 5.0 mm (p90)
   from the line.
+- **Media in the repo:** [`maze/report_media/`](../maze/report_media/) -- the first complete run at
+  4x speed (`first_finish_4x.mp4`), live-view stills of the finishes and the 74 % run, the route
+  map (printed line vs planned safe route) and the wall detection.
 - **Typical run:** baseline tracker, 126 runs: mean 26 %, median 25 % of the route.
 - **Why most runs fall** (`rl_hw/maze_falls.py`, 75 falls): outside the first hole the ball is
   2-3x too fast (50-70 mm/s vs the 25 mm/s reference) and overshoots bends by 11-17 mm into a
