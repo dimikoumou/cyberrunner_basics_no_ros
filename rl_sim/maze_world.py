@@ -94,12 +94,39 @@ class MazeWorld(torch.nn.Module):
         self.hole_c = torch.tensor([h["center"] for h in r["holes"]], dtype=torch.float32)
         self.hole_r = torch.tensor([h["radius"] for h in r["holes"]], dtype=torch.float32)
 
+    def set_variation(self, rng=None, b=1, level_deg=0.3, slope_deg=0.4, slope_len=0.03, n_bumps=40,
+                      static_sigma=0.3, k_sigma=0.08, acc_noise=0.004):
+        """Run-to-run variation as measured on the rig (level drifts 0.3-0.5 deg between runs, local
+        slopes up to ~1 deg, stiction varies a lot from place to place): per run a global level error,
+        a smooth random slope field, a stiction and a gain factor, and a little random acceleration.
+        Without it every simulated run ends at the same one or two holes. rng=None switches it off."""
+        if rng is None:
+            self.var = None
+            return
+        t = lambda a: torch.tensor(np.asarray(a), dtype=torch.float32)
+        self.var = {"bias": t(rng.normal(0, level_deg, (b, 1, 2))),
+                    "c": t(rng.uniform([-0.15, -0.13], [0.15, 0.13], (b, n_bumps, 2))),
+                    "amp": t(rng.normal(0, slope_deg, (b, n_bumps, 2))), "len": slope_len,
+                    "static": t(np.exp(rng.normal(0, static_sigma, (b, 1)))),
+                    "k": t(np.exp(rng.normal(0, k_sigma, (b, 1)))), "noise": acc_noise}
+
+    def _slope(self, p):
+        """extra tilt (deg) the ball feels at p: global level error + the local slope field"""
+        V = self.var
+        w = torch.exp(-((p[:, None, :] - V["c"]) ** 2).sum(-1) / (2 * V["len"] ** 2))        # (B, K)
+        return V["bias"][:, 0] + (w[..., None] * V["amp"]).sum(1) / 2.0
+
     def step(self, p, v, tilt, u_hist, u_now, dt=wm.DT, sub=4):
         tau = torch.exp(self.base.log_tau)
         h = dt / sub
+        V = getattr(self, "var", None)
         for _ in range(sub):
             tilt = tilt + (u_now - tilt) * (h / tau)
-            a = self.base.acc(p, v, tilt, u_hist)
+            if V is None:
+                a = self.base.acc(p, v, tilt, u_hist)
+            else:
+                a = self.base.acc(p, v, tilt + self._slope(p), u_hist, V["k"], V["static"])
+                a = a + V["noise"] * torch.randn_like(a)
             if self.walls is not None:
                 a = a + self.walls.acc(p, v)
             v = v + a * h

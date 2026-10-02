@@ -38,11 +38,14 @@ MAZE_SPEED, LOS_TOL = 0.025, 0.003
 BOOST_RATE, BOOST_MAX = 1.0, 0.6
 POS_NOISE = 0.0004
 STALL_S, MAX_S = 15.0, 400.0
+VARY = os.environ.get("MAZE_VARY", "1") == "1"       # run-to-run variation (maze_world.set_variation)
 
 
 def run_once(world, policy_path, route, rng, max_s=MAX_S, verbose=False):
     pol = TrackPolicy(policy_path)
-    start = route[0] + rng.normal(0, 0.002, 2)
+    world.set_variation(rng if VARY else None)
+    world.delay = int(rng.integers(2, 5)) if VARY else world.delay
+    start = route[0] + rng.normal(0, 0.004 if VARY else 0.002, 2)
     tracker = PathTracker(route, False, start, keep_direction=True, v=MAZE_SPEED, los_tol=LOS_TOL)
     p = torch.tensor(start[None], dtype=torch.float32)
     v = torch.zeros(1, 2)

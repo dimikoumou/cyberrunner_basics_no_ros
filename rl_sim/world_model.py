@@ -43,11 +43,12 @@ class WorldModel(torch.nn.Module):
         torch.nn.init.zeros_(self.net[-1].weight)
         torch.nn.init.zeros_(self.net[-1].bias)               # starts as pure physics
 
-    def acc(self, p, v, tilt, u_hist):
-        """p, v (B,2) m, m/s; tilt (B,2) deg (actual plate); u_hist (B,N_HIST,2) deg commanded"""
-        k = torch.exp(self.log_k)
+    def acc(self, p, v, tilt, u_hist, k_scale=None, static_scale=None):
+        """p, v (B,2) m, m/s; tilt (B,2) deg (actual plate); u_hist (B,N_HIST,2) deg commanded.
+        k_scale / static_scale (B,1): per-run variation of the gain and of the stiction"""
+        k = torch.exp(self.log_k) * (1.0 if k_scale is None else k_scale)
         a_roll = torch.exp(self.log_roll)
-        a_st = k * torch.exp(self.log_static)
+        a_st = k * torch.exp(self.log_static) * (1.0 if static_scale is None else static_scale)
         speed = torch.sqrt((v ** 2).sum(-1, keepdim=True) + 0.004 ** 2)
         drive = k * (tilt + self.bias)
         w = torch.exp(-(speed / 0.01) ** 2)
