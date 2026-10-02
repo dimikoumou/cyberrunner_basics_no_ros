@@ -103,7 +103,12 @@ def main():
         c, e = px2plate(x, y), px2plate(x + r, y)
         if np.all(np.isfinite(c)) and np.all(np.isfinite(e)):
             holes_extra.append([float(c[0]), float(c[1]), float(np.hypot(*(e - c)))])
-    np.savez(os.path.join(D, "walls_grid.npz"), occ=occ, lo=lo, cell=CELL, holes_extra=np.array(holes_extra))
+    # signed distance to the nearest wall (m, > 0 in free space), lightly smoothed: the maze
+    # simulator (rl_sim/maze_world.py) needs it and its environment has no OpenCV / SciPy
+    d_out = cv2.distanceTransform((1 - occ).astype(np.uint8), cv2.DIST_L2, 5) * CELL
+    d_in = cv2.distanceTransform(occ.astype(np.uint8), cv2.DIST_L2, 5) * CELL
+    sdf = cv2.GaussianBlur((d_out - d_in).astype(np.float32), (0, 0), 1.0)
+    np.savez(os.path.join(D, "walls_grid.npz"), occ=occ, lo=lo, cell=CELL, holes_extra=np.array(holes_extra), sdf=sdf)
     print(f"{len(holes_extra)} extra holes found (not in route.json)")
     chk = full.copy()
     chk[wall_px] = (0.4 * chk[wall_px] + 0.6 * np.array([255, 0, 255])).astype(np.uint8)

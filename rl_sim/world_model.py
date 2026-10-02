@@ -100,7 +100,7 @@ def load_windows(files, max_rows=None):
         u = app * TILT_MAX
         ok = (found > 0) & np.isfinite(x) & np.isfinite(y) & np.array([s in ("running", "in_circle") for s in st])
         dt = np.diff(t, prepend=t[0])
-        ok &= (dt > 0.02) & (dt < 0.06)
+        ok &= (dt > 0.02) & (dt < float(os.environ.get("WM_DT_MAX", "0.06")))
         for i in range(N_HIST + 5, len(t) - H - 1, 3):
             if not ok[i - N_HIST - 5:i + H + 1].all():
                 continue
