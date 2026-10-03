@@ -83,7 +83,8 @@ class Rig:
         # live view for the phone relay (rl_hw/remote_view.py reads :8000): camera image + the target
         from ui_server import UIServer
         self.ui = UIServer(8000)
-        self.env.frame_callback = self.ui.publish_frame
+        self.env.frame_callback = self._on_frame
+        self.vid, self.vid_label, self.vid_ov, self.vid_text = None, None, {}, ""
         self.ui.set_state(running=True, mode="click")
         self.csv = None
         self.applied_prev = np.zeros(2)
@@ -118,6 +119,50 @@ class Rig:
                 pass
         log({"event": "shutdown", "why": why, "released": release})
         os._exit(1)
+
+    # ---- camera video (demo phase) ------------------------------------------------------------
+    def _on_frame(self, frame):
+        self.ui.publish_frame(frame)
+        if self.vid_label is None or frame is None:
+            return
+        import cv2
+        img = frame.copy()
+        h, w = img.shape[:2]
+        if self.vid is None:
+            p = os.path.join(DATA, "..", "report", "video", self.vid_label["file"])
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            self.vid = cv2.VideoWriter(p, cv2.VideoWriter_fourcc(*"avc1"), 29, (w, h))
+            if not self.vid.isOpened():
+                self.vid = cv2.VideoWriter(p, cv2.VideoWriter_fourcc(*"mp4v"), 29, (w, h))
+        ov = self.vid_ov
+        if ov.get("path_px") is not None:
+            cv2.polylines(img, [np.asarray(ov["path_px"], dtype=np.int32)], False, (60, 200, 60), 2, cv2.LINE_AA)
+        if ov.get("ref_px") is not None:
+            cv2.circle(img, (int(ov["ref_px"][0]), int(ov["ref_px"][1])), 4, (0, 140, 255), -1, cv2.LINE_AA)
+        if ov.get("goal_px") is not None:
+            c = (int(ov["goal_px"][0]), int(ov["goal_px"][1]))
+            cv2.circle(img, c, max(3, int(ov["goal_r_px"])), (60, 200, 60), 2, cv2.LINE_AA)
+            cv2.drawMarker(img, c, (60, 200, 60), cv2.MARKER_CROSS, 10, 1)
+        col = self.vid_label["color"]
+        cv2.rectangle(img, (0, 0), (w, 46), (255, 255, 255), -1)
+        sc = 0.9
+        while sc > 0.4 and cv2.getTextSize(self.vid_label["title"], cv2.FONT_HERSHEY_SIMPLEX, sc, 2)[0][0] > w - 20:
+            sc -= 0.05                                  # the whole method name must fit the frame
+        cv2.putText(img, self.vid_label["title"], (10, 32), cv2.FONT_HERSHEY_SIMPLEX, sc, col, 2, cv2.LINE_AA)
+        cv2.rectangle(img, (0, h - 28), (w, h), (255, 255, 255), -1)
+        cv2.putText(img, f"{self.vid_label['sub']}   {self.vid_text}", (10, h - 9), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                    (40, 40, 40), 1, cv2.LINE_AA)
+        self.vid.write(img)
+
+    def start_video(self, file, title, sub, color):
+        self.stop_video()
+        self.vid_label = {"file": file, "title": title, "sub": sub, "color": color}
+
+    def stop_video(self):
+        self.vid_label = None
+        if self.vid is not None:
+            self.vid.release()
+        self.vid = None
 
     # ---- one control step ---------------------------------------------------------------
     def step(self, action, tag=""):
@@ -163,8 +208,10 @@ class Rig:
             if a is not None and b is not None:
                 self.ui.set_overlay(goal_px=(float(a[1]), float(a[0])),
                                     goal_r_px=float(np.hypot(b[0] - a[0], b[1] - a[1])))
+                self.vid_ov = {"goal_px": (float(a[1]), float(a[0])), "goal_r_px": float(np.hypot(b[0] - a[0], b[1] - a[1]))}
             if text:
                 self.ui.set_state(hole_msg=text)
+                self.vid_text = text
         except Exception:
             pass
 
@@ -557,6 +604,95 @@ def retest(rig, r, dry, max_per_run=12):
             test(rig, SACCtl(model), algo, mins, n=n, run=m.group(1), r=r)
 
 
+# ---- demo: real camera footage of the controllers -----------------------------------------------
+def demo(rig, dry, n=10):
+    """film each controller through the rig camera on the same first n frozen test targets"""
+    from stable_baselines3 import SAC
+    n = 3 if dry else n
+    BLUE, RED, GREY = (235, 99, 37), (38, 38, 220), (90, 90, 90)
+    clips = [("demo_odil_rig_60min.mp4", "ODIL - trained only on the rig (60 rig min)", BLUE,
+              lambda: ODILCtl(os.path.join(SIM, "runs", "odil1_rig_r1", "odil_policy.npz")), "odil_rig60"),
+             ("demo_sac_rig_120min.mp4", "SAC (RL) - trained only on the rig (120 rig min)", RED,
+              lambda: SACCtl(SAC.load(os.path.join(SIM, "runs", "sac1_rig", "sac_120min.zip"), device="cpu")), "sac_rig120"),
+             ("demo_odil_v11_sim.mp4", "ODIL v11 - trained in simulation", BLUE,
+              lambda: ODILCtl(os.path.join(SIM, "runs", "odil_v11", "odil_policy.npz")), "odil_v11_sim"),
+             ("demo_ppo_v3_sim.mp4", "PPO v3 (RL) - trained in simulation", RED,
+              lambda: SimPPOCtl(os.path.join(SIM, "runs", "plate_goal_v3", "policy_final.npz")), "ppo_v3_sim")]
+    for file, title, col, make, name in clips:
+        rig.start_video(file, title, "real rig camera, real time, green circle = target (12 mm)", col)
+        try:
+            test(rig, make(), name, 0, n=n, run="demo")
+        finally:
+            rig.stop_video()
+
+
+# ---- demo: ODIL following a line (real camera footage) -------------------------------------------
+def demo_track(rig, dry, shapes_=("circle", "square", "star"), speed=0.03):
+    """the part-1 ODIL path tracker (rl_sim/runs/odil_track_best, + closed-loop refinement) draws
+    shapes like pd_balance.py's draw mode: PathTracker reference, ODIL action, the same breakaway
+    boost along the route; filmed through the rig camera, accuracy logged"""
+    sys.path.insert(0, SIM)
+    import shapes
+    from line_path import PathTracker
+    from odil_track import TrackPolicy
+    from goal_circle import plate_to_pixel
+    track = TrackPolicy(os.path.join(SIM, "runs", "odil_track_best", "odil_track_policy.npz"))
+    to_balance = ODILCtl(os.path.join(SIM, "runs", "odil_v11", "odil_policy.npz"))
+    BLUE = (235, 99, 37)
+    for name in (shapes_[:1] if dry else shapes_):
+        path = shapes.resample(shapes.shape(name, (-0.05, 0.02), 0.035))
+        px = []
+        for p in path:
+            q = plate_to_pixel(rig.env, np.asarray(p, float))
+            if q is not None:
+                px.append((float(q[1]), float(q[0])))
+        rig.start_video(f"demo_odil_line_{name}.mp4", f"ODIL path tracker - following a {name}",
+                        f"real rig camera, real time, green line = path, orange dot = moving reference ({speed * 100:.0f} cm/s)",
+                        BLUE)
+        rig.vid_ov = {"path_px": px}
+        # bring the ball to the start of the path (ODIL balance controller), up to 12 s
+        to_balance.reset()
+        pos, vel, al, be, found, _ = rig.step(np.zeros(2), "demo_track")
+        t0 = time.time()
+        while time.time() - t0 < 12 and found and np.hypot(*(path[0] - pos)) > 0.006:
+            pos, vel, al, be, found, _ = rig.step(to_balance(path[0], 0.006, pos, vel, al, be), "demo_track")
+        if not found:
+            rig.stop_video()
+            continue
+        follower = PathTracker(path, False, pos, keep_direction=True, v=speed)
+        track.reset()
+        boost, offs, t_prev, t0 = 0.0, [], time.time(), time.time()
+        while time.time() - t0 < 60:
+            now = time.time()
+            dt = max(now - t_prev, 1e-3)
+            t_prev = now
+            ref = follower.update(pos, dt)
+            if ref.get("finished"):
+                break
+            if np.hypot(*vel) < 0.01 and ref["lag"] > 0.005:          # pd_balance LINE_BOOST_RATE / _MAX
+                boost = min(0.6, boost + 1.0 * dt)
+            else:
+                boost = max(0.0, boost - 2.0 * dt)
+            a = np.clip(np.asarray(track(ref, pos, vel, dt), float) + boost * ref["t_hat"], -0.8, 0.8)
+            q = plate_to_pixel(rig.env, np.asarray(ref["p"], float))
+            if q is not None:
+                rig.vid_ov["ref_px"] = (float(q[1]), float(q[0]))
+            pos, vel, al, be, found, _ = rig.step(a, "demo_track")
+            if not found:
+                break
+            offs.append(1000 * float(np.min(np.hypot(*(path - pos).T))))
+        # hold the end for 2 s so the clip ends calmly
+        t1 = time.time()
+        while time.time() - t1 < 2 and found:
+            pos, vel, al, be, found, _ = rig.step(to_balance(path[-1], 0.012, pos, vel, al, be), "demo_track")
+        rig.stop_video()
+        rig.vid_ov = {}
+        if offs:
+            log({"event": "track demo", "shape": name, "speed_mm_s": 1000 * speed, "seconds": round(time.time() - t0, 1),
+                 "median_mm": round(float(np.median(offs)), 2), "p90_mm": round(float(np.percentile(offs, 90)), 2),
+                 "max_mm": round(float(np.max(offs)), 2)})
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--plan", default="ref,odil,sac")
@@ -594,6 +730,10 @@ def main():
             elif phase == "odil":
                 rig.stop_csv()
                 odil_rounds(rig, a.odil_rounds, a.odil_min, rng, a.dry, run)
+            elif phase == "demo_track":
+                demo_track(rig, a.dry)
+            elif phase == "demo":
+                demo(rig, a.dry)
             elif phase == "retest":
                 retest(rig, a.retest_mm / 1000.0, a.dry)
             elif phase in ("sac", "ppo"):
