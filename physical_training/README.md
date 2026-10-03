@@ -37,6 +37,15 @@ Alternate the order across sessions so rig drift does not always hit the same me
 
 Every test is logged with its run (`odil1`, `sac2`, ...) and the rig minutes of training data.
 
+## The plate surface (record of the setup)
+
+White lined paper in two sheets: a **tape seam running top to bottom on the right side** joins
+them, and the **hole in the middle is covered with tape** (the hole detector finds no hole). Both
+taped areas have different friction / stiction from the bare paper. All methods train and are
+tested on this same surface with the same 30 fixed targets, so the comparison is fair, but ODIL's
+fitted model assumes uniform friction while RL learns the surface implicitly -- worth reporting,
+and the recordings allow checking the ball's behaviour on the seam and the patch afterwards.
+
 ## Running it
 
 Needs: the white paper plate on the rig, the plate levelled by hand, no `pd_balance.py` running.
