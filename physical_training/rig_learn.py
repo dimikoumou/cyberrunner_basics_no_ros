@@ -87,7 +87,7 @@ class Rig:
     def check(self):
         for k, t0 in self.start_ticks.items():
             if abs(self.env._cmd_ticks.get(k, t0) - t0) > WATCH_TICKS:
-                self.shutdown(f"motor {k} command {self.env._cmd_ticks.get(k)} left +-{WATCH_TICKS} of {t0}")
+                self.shutdown(f"motor {k} command {self.env._cmd_ticks.get(k)} left +-{WATCH_TICKS} of {t0}", release=True)
         if self.env.camera_stale():
             print("camera frozen -- plate held level, waiting", flush=True)
             self.env.hold_session_level()
@@ -95,19 +95,21 @@ class Rig:
                 time.sleep(0.2)
             print("frames back", flush=True)
 
-    def shutdown(self, why):
+    def shutdown(self, why, release=False):
+        """release=True only for a runaway (watchdog). Otherwise the motors keep holding: releasing
+        lets the plate sag under its own weight (-14 deg in the dry run) and it must be re-levelled."""
         print("SHUTDOWN:", why, flush=True)
         try:
             self.stop_csv()
         except Exception:
             pass
         from state_est_control import ADDR_TORQUE_ENABLE
-        for k in (1, 3):
+        for k in ((1, 3) if release else ()):
             try:
                 self.env.packet_handler.write1ByteTxRx(self.env.port_handler, k, ADDR_TORQUE_ENABLE, 0)
             except Exception:
                 pass
-        log({"event": "shutdown", "why": why})
+        log({"event": "shutdown", "why": why, "released": release})
         os._exit(1)
 
     # ---- one control step ---------------------------------------------------------------
@@ -152,7 +154,9 @@ class Rig:
         t0, seen, noted = time.time(), 0, False
         while seen < 10:
             pos, _, _, _, found, _ = self.step(np.zeros(2), "wait_ball")
-            on = found and abs(pos[0]) < self.env._x_half and abs(pos[1]) < self.env._y_half
+            # on the plate rig the ball cannot be anywhere else: a ball pressed against the frame sits a
+            # little outside the marker-to-marker extents and must still count (it waited forever)
+            on = found and abs(pos[0]) < self.env._x_half + 0.02 and abs(pos[1]) < self.env._y_half + 0.02
             seen = seen + 1 if on else 0
             if not noted and time.time() - t0 > 120:
                 log({"event": "ball not visible for 2 min -- waiting, plate level"})
