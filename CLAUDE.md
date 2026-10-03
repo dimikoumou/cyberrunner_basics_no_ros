@@ -11,6 +11,12 @@ Read these before working here:
 
 Branch: `ball-on-plate`. Git author for commits: `dimikoumou <dimi0330@icloud.com>`.
 
+## Three parts (see [`docs/REPO_MAP.md`](docs/REPO_MAP.md))
+
+1. **Ball on plate, simulation -> rig**: `rl_sim/` trains (classic, RL, ODIL), `rl_hw/` runs it.
+2. **Maze**: line following, the printed route on the real labyrinth board, the learning loop.
+3. **Ball on plate trained only on the rig**: [`physical_training/`](physical_training/README.md).
+
 ## Layout
 
 - `rl_hw/` -- everything that touches the rig: `pd_balance.py` (controller + UI on :8000),

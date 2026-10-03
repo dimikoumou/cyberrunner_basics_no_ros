@@ -114,3 +114,4 @@ last_goal.json
 .controller.lock
 bias_table.json
 .venv-rl/
+physical_training/data/

@@ -1,3 +1,16 @@
+# CyberRunner -- ball on plate and labyrinth with ODIL and RL
+
+**Start here:** [`docs/REPO_MAP.md`](docs/REPO_MAP.md) (the three parts and which file belongs where),
+[`docs/ODIL_REPORT.md`](docs/ODIL_REPORT.md) (results), [`CLAUDE.md`](CLAUDE.md) (rules for working on the rig).
+
+1. Ball on plate trained in simulation, applied to the rig (`rl_sim/`, `rl_hw/`)
+2. Maze: line following and the real labyrinth board (`rl_hw/maze_*`, `rl_sim/maze_world.py`)
+3. Ball on plate trained only on the physical rig (`physical_training/`)
+
+The original course material (camera calibration, state estimation basics) follows below.
+
+---
+
 # CyberRunner Robotics Basics
 
 This repository contains tools for computer vision-based state estimation and motor control for a ball balancing platform project.
