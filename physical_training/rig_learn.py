@@ -327,8 +327,14 @@ def test(rig, ctl, name, rig_minutes, n=30, seed=2027, run=None, r=R_TEST):
     """the same n targets for every controller -> metrics, logged with the rig minutes; `r` is the
     target radius the controller is told and that counts as reached (12 mm unless a retest)"""
     tag = "" if abs(r - R_TEST) < 1e-9 else f"_r{1000 * r:.0f}mm"
-    rng = np.random.default_rng(seed)
-    targets = [random_target(rng, rig) for _ in range(n)]
+    # the targets are FROZEN (data/test_targets.json, session 1): a hole detected in a later session
+    # must not change them (2026-10-03: holes 0 -> 1 would have shifted the random draw)
+    fz = os.path.join(DATA, "test_targets.json")
+    if os.path.exists(fz) and seed == 2027:
+        targets = [np.array(g, dtype=float) for g in json.load(open(fz))["targets"]][:n]
+    else:
+        rng = np.random.default_rng(seed)
+        targets = [random_target(rng, rig) for _ in range(n)]
     R = []
     prev_csv = rig.csv is not None
     if not prev_csv:                                  # tests are recorded too: any tolerance can be
