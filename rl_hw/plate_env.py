@@ -735,6 +735,19 @@ class HardwarePlateEnv(gym.Env):
         target = (-action[1] * TILT_MAX_DEG + LEVEL_OFFSET_DEG[0],
                   action[0] * TILT_MAX_DEG + LEVEL_OFFSET_DEG[1])  # (alpha, beta)
         meas = self._meas_tilt if self._meas_tilt is not None else self._tilt_target
+        # plausibility (2026-10-03): the ball rolled next to a plate marker, the tilt reading jumped
+        # 10 deg and STAYED wrong; the servo "corrected" a real tilt into the plate for 4 min. A real
+        # plate cannot stay > 6 deg from its command for half a second: distrust the reading (no
+        # correction, motors hold) and make the marker tracking search again from scratch.
+        if self._pose_ok and self._meas_tilt is not None and len(self._target_hist) > 6:
+            off = max(abs(self._target_hist[-6][k] - meas[k]) for k in (0, 1))
+            self._implausible_n = getattr(self, "_implausible_n", 0) + 1 if off > 6.0 else 0
+            if self._implausible_n >= 15:
+                if self._implausible_n == 15:
+                    print(f"[HardwarePlateEnv] tilt reading {off:.1f} deg from the command for 0.5 s -- "
+                          f"not trusted, servo holds, plate markers re-searched")
+                    self.pipeline.measurements.detector.corners = None
+                self._pose_ok = False
         self._target_hist.append(target)
         self._target_hist = self._target_hist[-12:]
         for i, dxl_id in enumerate(DXL_IDS):

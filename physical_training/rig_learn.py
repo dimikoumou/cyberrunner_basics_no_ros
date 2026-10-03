@@ -216,6 +216,11 @@ class RandomTilts:
         self.u += -self.u * DT / 1.5 + 0.2 * np.sqrt(DT) * self.rng.normal(size=2)
         over = np.maximum(np.abs(pos) - np.array([0.07, 0.055]), 0.0)          # how far past 7 / 5.5 cm
         back = np.clip(-np.sign(pos) * 4.0 * over, -0.3, 0.3)
+        if np.all(np.abs(pos) > [0.09, 0.07]):
+            # a corner: a plate marker sits there and the ball next to it corrupts the tilt reading
+            # (session 1: -10 deg, a 4-min runaway) -> leave it decisively, along both axes
+            back = -np.sign(pos) * 0.35
+            self.u[:] = 0.0
         sp = float(np.hypot(*vel))
         brake = -0.25 * vel / sp * min(1.0, (sp - 0.15) / 0.1) if sp > 0.15 else 0.0
         return np.clip(self.u + back + brake, -0.35, 0.35)
