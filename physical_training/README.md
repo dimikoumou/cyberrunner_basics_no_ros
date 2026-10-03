@@ -60,3 +60,16 @@ cd physical_training
 Safety: motor caps fixed around the start position; the script aborts and releases the motors if
 a tilt motor leaves +-1300 ticks of its start; a frozen camera holds the plate level; a ball that
 is not visible -> plate level until it is seen again (no elevator on the plate rig).
+
+## Reuse training on another computer (no rig needed)
+
+The three ODIL rig recordings of session 1 (`data/odil1_r0..2.csv`) are in git for this.
+
+```
+git clone https://github.com/dimikoumou/cyberrunner_basics_no_ros.git
+cd cyberrunner_basics_no_ros && git checkout ball-on-plate
+python3 -m venv .venv-rl && .venv-rl/bin/pip install -r physical_training/requirements-reuse.txt
+cd physical_training && ../.venv-rl/bin/python3 reuse_tracker.py odil1
+```
+Output: `rl_sim/runs/reuse_odil1_track/odil_track_policy.npz` (copy it back to the rig Mac, or
+commit it with `git add -f`). On Apple silicon set `ODIL_THREADS`/`FT_THREADS` to the core count.
