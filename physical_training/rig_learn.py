@@ -119,6 +119,17 @@ class Rig:
         a = np.clip(np.asarray(action, dtype=float), -1, 1)
         obs, _, _, _, info = self.env.step(a.astype(np.float32))
         found = bool(info.get("ball_found", info.get("status") != "ball_lost"))
+        # a frame or two without the ball (camera hiccup, edge) is not a lost ball: hold the last
+        # position; only 10 misses in a row (1/3 s) count as lost (the dry run lost 6 of 6 trips)
+        pos_ = np.array(obs[:2], float)
+        if found:
+            self.miss, self.last_pos = 0, pos_
+        else:
+            self.miss = getattr(self, "miss", 0) + 1
+            if self.miss < 10 and getattr(self, "last_pos", None) is not None:
+                obs = np.array(obs, dtype=np.float32).copy()
+                obs[0:2], obs[2:4] = self.last_pos, 0.0
+                found = True
         applied = np.asarray(getattr(self.env, "_last_commanded_action", a), dtype=float)
         jerk = float(np.sum((applied - self.applied_prev) ** 2))
         self.applied_prev = applied
