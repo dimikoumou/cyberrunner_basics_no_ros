@@ -16,6 +16,27 @@ from a hand-made simulator?
 Expected from earlier measurements (to be confirmed by this experiment): ODIL about 30 min of rig
 data per round; RL (SAC) about 2-5 h; PPO about 10-30 h (not run: too long for a night).
 
+## Full experiment (multi-day; the rig can run unattended)
+
+| Block | Content | Rig time |
+|---|---|---|
+| `ref` (every session) | the part-1 controllers trained in simulation (ODIL v11, PPO v3) on the 30 targets | ~15 min |
+| `odil` x 3 | 3 rounds x 30 min of driving each, own seed per run | ~6 h |
+| `sac` x 3 | until it stops improving, up to 10 h each (`--sac-hours 10`) | ~30 h |
+| `ppo` x 1 | the full model-free on-policy curve, up to 30 h (`--ppo-hours 30`) | ~30 h |
+| PPO in the fitted model | on the ODIL rig data, offline (separates "having a model" from "how it is optimised") | 0 |
+
+Alternate the order across sessions so rig drift does not always hit the same method, e.g.
+
+```
+../.venv-rl/bin/python3 rig_learn.py --plan ref,odil,sac --sac-hours 10
+../.venv-rl/bin/python3 rig_learn.py --plan ref,sac,odil --sac-hours 10
+../.venv-rl/bin/python3 rig_learn.py --plan ref,odil,sac --sac-hours 10
+../.venv-rl/bin/python3 rig_learn.py --plan ref,ppo --ppo-hours 30
+```
+
+Every test is logged with its run (`odil1`, `sac2`, ...) and the rig minutes of training data.
+
 ## Running it
 
 Needs: the white paper plate on the rig, the plate levelled by hand, no `pd_balance.py` running.
@@ -24,7 +45,7 @@ Uses `.venv-rl` (PyTorch + stable-baselines3; OpenCV 4.10 and the Dynamixel SDK 
 ```
 cd physical_training
 ../.venv-rl/bin/python3 rig_learn.py --dry          # ~10 min supervised check: every phase briefly
-../.venv-rl/bin/python3 rig_learn.py                # the night: ODIL 3 x 30 min, then SAC 6 h
+../.venv-rl/bin/python3 rig_learn.py                # one session: references, ODIL 3 x 30 min, SAC 6 h
 ```
 
 Safety: motor caps fixed around the start position; the script aborts and releases the motors if

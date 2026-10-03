@@ -34,6 +34,7 @@ import signal
 import subprocess
 import sys
 import time
+import zlib
 
 import numpy as np
 
@@ -183,7 +184,7 @@ class ODILCtl:
 
 
 class SACCtl:
-    """deterministic SAC policy with the RL observation and rate limit (as rl_policy.RigPolicyController)"""
+    """deterministic SAC or PPO policy with the RL observation and rate limit (as rl_policy.RigPolicyController)"""
 
     def __init__(self, model):
         self.m, self.hist = model, [np.zeros(2)] * N_HIST
@@ -197,6 +198,30 @@ class SACCtl:
         a = np.clip(np.asarray(a, float) * ACTION_SCALE, self.hist[-1] - POLICY_RATE, self.hist[-1] + POLICY_RATE)
         self.hist = self.hist[1:] + [a.copy()]
         return a
+
+
+class SimPPOCtl:
+    """the simulation-trained PPO v3 (part 1), exactly as the rig runs it (rl_policy.RigPolicyController)"""
+
+    def __init__(self, path):
+        from rl_policy import RigPolicyController
+        self.c = RigPolicyController(path, LEVEL)
+
+    def reset(self):
+        self.c.reset()
+
+    def __call__(self, goal, radius, pos, vel, alpha, beta):
+        a = np.asarray(self.c.action(goal, radius, pos, vel, alpha, beta), dtype=float)
+        self.c.record_applied(a)
+        return a
+
+
+def references(rig, dry):
+    """the part-1 controllers (trained in simulation) on the same targets: anchors every session and
+    links 'trained in simulation' to 'trained only on the rig'"""
+    n = 6 if dry else 30
+    test(rig, ODILCtl(os.path.join(SIM, "runs", "odil_v11", "odil_policy.npz")), "ref_odil_v11_sim", 0, n=n, run="ref")
+    test(rig, SimPPOCtl(os.path.join(SIM, "runs", "plate_goal_v3", "policy_final.npz")), "ref_ppo_v3_sim", 0, n=n, run="ref")
 
 
 def random_target(rng, rig):
@@ -232,7 +257,7 @@ def drive(rig, ctl, minutes, rng, tag, goal_s=6.0):
     return driven / 60.0
 
 
-def test(rig, ctl, name, rig_minutes, n=30, seed=2027):
+def test(rig, ctl, name, rig_minutes, n=30, seed=2027, run=None):
     """the same n targets for every controller -> metrics, logged with the rig minutes"""
     rng = np.random.default_rng(seed)
     targets = [random_target(rng, rig) for _ in range(n)]
@@ -266,7 +291,7 @@ def test(rig, ctl, name, rig_minutes, n=30, seed=2027):
         if lost:
             rig.reload()
     ok = [r for r in R if r["reached"]]
-    rec = {"event": "test", "method": name, "rig_minutes": round(rig_minutes, 1), "n": n,
+    rec = {"event": "test", "method": name, "run": run, "rig_minutes": round(rig_minutes, 1), "n": n,
            "reached": len(ok), "lost": sum(r["lost"] for r in R),
            "t_reach_med": float(np.median([r["t_reach"] for r in ok])) if ok else None,
            "inside_after_mean": float(np.mean([r["inside_after"] for r in ok])) if ok else 0.0,
@@ -274,19 +299,19 @@ def test(rig, ctl, name, rig_minutes, n=30, seed=2027):
            "jerk_med": float(np.median([r["jerk"] for r in R if r["jerk"] is not None])),
            "trips": R}
     log({k: v for k, v in rec.items() if k != "trips"})
-    with open(os.path.join(DATA, f"test_{name}_{int(rig_minutes)}min.json"), "w") as f:
+    with open(os.path.join(DATA, f"test_{run or name}_{int(rig_minutes)}min.json"), "w") as f:
         json.dump(rec, f)
     return rec
 
 
 # ---- ODIL ---------------------------------------------------------------------------------
-def odil_rounds(rig, rounds, minutes, rng, dry):
+def odil_rounds(rig, rounds, minutes, rng, dry, run="odil1"):
     files, rig_min, policy = [], 0.0, None
     py = os.path.join(ROOT, ".venv-rl", "bin", "python3")
     for r in range(rounds):
         ctl = RandomTilts(rng) if policy is None else ODILCtl(policy)
-        fn = rig.start_csv(f"odil_r{r}")
-        rig_min += drive(rig, ctl, minutes, rng, f"odil_r{r}")
+        fn = rig.start_csv(f"{run}_r{r}")
+        rig_min += drive(rig, ctl, minutes, rng, f"{run}_r{r}")
         rig.stop_csv()
         files.append(fn)
         rig.env._write_action(np.zeros(2, dtype=np.float32))
@@ -305,7 +330,7 @@ def odil_rounds(rig, rounds, minutes, rng, dry):
                    ODIL_K_RANGE=f"{0.9 * k:.4f},{1.1 * k:.4f}", ODIL_A_ROLL=f"{ar:.4f}",
                    ODIL_TAU_RANGE=f"{max(0.01, 0.7 * min(taus)):.3f},{max(0.02, 1.3 * max(taus)):.3f}",
                    ODIL_STATIC_RANGE=f"{0.7 * brk:.2f},{1.3 * brk:.2f}")
-        name = f"odil_rig_r{r}" + ("_dry" if dry else "")
+        name = f"{run}_rig_r{r}" + ("_dry" if dry else "")
         iters = "60" if dry else "1500"
         # train while the plate is held level (a background thread would fight the camera for the CPU)
         proc = subprocess.Popen([py, "odil_plate_v9.py", iters, name], cwd=SIM, env=env,
@@ -313,21 +338,23 @@ def odil_rounds(rig, rounds, minutes, rng, dry):
         while proc.poll() is None:
             rig.level_idle(2.0)
         cand = os.path.join(SIM, "runs", name, "odil_policy.npz")
-        log({"event": "odil fitted+trained", "round": r, "rig_minutes": round(rig_min, 1),
+        log({"event": "odil fitted+trained", "run": run, "round": r, "rig_minutes": round(rig_min, 1),
              "k_acc": k, "a_roll": ar, "tau_s": taus, "breakaway_deg": brk,
              "train_minutes": round((time.time() - t0) / 60, 1), "ok": os.path.exists(cand)})
         if not os.path.exists(cand):
             break
         policy = cand
-        test(rig, ODILCtl(policy), "odil", rig_min, n=6 if dry else 30)
+        test(rig, ODILCtl(policy), "odil", rig_min, n=6 if dry else 30, run=run)
     return policy
 
 
 # ---- SAC ----------------------------------------------------------------------------------
-def sac(rig, hours, test_min, rng, dry):
+def rl(rig, algo, hours, test_min, rng, dry, run="sac1"):
+    """model-free RL on the rig: SAC (off-policy, replays its memory) or PPO (on-policy, the RL
+    that was used in simulation). Network updates happen with the plate level."""
     import gymnasium as gym
     from gymnasium import spaces
-    from stable_baselines3 import SAC
+    from stable_baselines3 import SAC, PPO
     from stable_baselines3.common.callbacks import BaseCallback
 
     EP = 450
@@ -377,11 +404,18 @@ def sac(rig, hours, test_min, rng, dry):
             return self._obs(), r, False, self.k >= EP, {}
 
     env = RigGoalEnv()
-    model = SAC("MlpPolicy", env, learning_rate=3e-4, buffer_size=300_000, batch_size=256,
-                gamma=0.99, tau=0.005, learning_starts=60 if dry else 5_000,
-                train_freq=(1, "episode"), gradient_steps=-1,       # updates between episodes, plate level
-                policy_kwargs=dict(net_arch=[256, 256]), verbose=0, device="cpu")
-    out_dir = os.path.join(SIM, "runs", "sac_rig" + ("_dry" if dry else ""))
+    seed = int(rng.integers(1 << 30))
+    if algo == "sac":
+        model = SAC("MlpPolicy", env, learning_rate=3e-4, buffer_size=300_000, batch_size=256,
+                    gamma=0.99, tau=0.005, learning_starts=60 if dry else 5_000,
+                    train_freq=(1, "episode"), gradient_steps=-1,   # updates between episodes, plate level
+                    policy_kwargs=dict(net_arch=[256, 256]), verbose=0, device="cpu", seed=seed)
+    else:
+        # the simulated-RL settings (rl_sim/train_plate_ppo.py), one rig instead of 8 simulators
+        model = PPO("MlpPolicy", env, n_steps=256 if dry else 2048, batch_size=64, n_epochs=10,
+                    learning_rate=3e-4, gamma=0.99, gae_lambda=0.95, clip_range=0.2,
+                    policy_kwargs=dict(net_arch=[256, 256]), verbose=0, device="cpu", seed=seed)
+    out_dir = os.path.join(SIM, "runs", f"{run}_rig" + ("_dry" if dry else ""))
     os.makedirs(out_dir, exist_ok=True)
     next_test = [test_min]
 
@@ -390,8 +424,8 @@ def sac(rig, hours, test_min, rng, dry):
             m = env.driven / 60.0
             if m >= next_test[0]:
                 rig.env._write_action(np.zeros(2, dtype=np.float32))
-                model.save(os.path.join(out_dir, f"sac_{int(m)}min"))
-                test(rig, SACCtl(model), "sac", m, n=6 if dry else 30)
+                model.save(os.path.join(out_dir, f"{algo}_{int(m)}min"))
+                test(rig, SACCtl(model), algo, m, n=6 if dry else 30, run=run)
                 next_test[0] += test_min
                 env.reset()
             return m < 60 * hours
@@ -400,13 +434,15 @@ def sac(rig, hours, test_min, rng, dry):
             rig.env._write_action(np.zeros(2, dtype=np.float32))      # level while the network updates
 
     model.learn(total_timesteps=10 ** 8, callback=Every())
-    model.save(os.path.join(out_dir, "sac_final"))
+    model.save(os.path.join(out_dir, f"{algo}_final"))
     return model
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--plan", default="odil,sac")
+    ap.add_argument("--plan", default="ref,odil,sac")
+    ap.add_argument("--ppo-hours", type=float, default=30)
+    ap.add_argument("--ppo-test-min", type=float, default=60)
     ap.add_argument("--odil-rounds", type=int, default=3)
     ap.add_argument("--odil-min", type=float, default=30)
     ap.add_argument("--sac-hours", type=float, default=6)
@@ -415,15 +451,23 @@ def main():
     a = ap.parse_args()
     if a.dry:
         a.odil_rounds, a.odil_min, a.sac_hours, a.sac_test_min = 1, 2, 4 / 60, 2
-    rng = np.random.default_rng(1)
+        a.ppo_hours, a.ppo_test_min = 4 / 60, 2
     rig = Rig()
     log({"event": "start", "plan": a.plan, "dry": a.dry, "start_ticks": rig.start_ticks, "holes": len(rig.holes)})
+    count = {}
     try:
         for phase in a.plan.split(","):
-            if phase == "odil":
-                odil_rounds(rig, a.odil_rounds, a.odil_min, rng, a.dry)
-            elif phase == "sac":
-                sac(rig, a.sac_hours, a.sac_test_min, rng, a.dry)
+            count[phase] = count.get(phase, 0) + 1
+            run = f"{phase}{count[phase]}" + ("_dry" if a.dry else "")
+            rng = np.random.default_rng(zlib.crc32(run.encode()))       # each run its own, reproducible seed
+            log({"event": "phase", "run": run})
+            if phase == "ref":
+                references(rig, a.dry)
+            elif phase == "odil":
+                odil_rounds(rig, a.odil_rounds, a.odil_min, rng, a.dry, run)
+            elif phase in ("sac", "ppo"):
+                hours = a.sac_hours if phase == "sac" else a.ppo_hours
+                rl(rig, phase, hours, a.sac_test_min if phase == "sac" else a.ppo_test_min, rng, a.dry, run)
         log({"event": "done"})
     finally:
         rig.shutdown("finished")
