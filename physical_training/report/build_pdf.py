@@ -87,6 +87,25 @@ def dry_results():
     return rows
 
 
+def session_results():
+    """the tests of the last real (non-dry) session at 12 mm"""
+    fn = os.path.join(ROOT, "phase3_logs", "rig_learn.jsonl")
+    recs = [json.loads(l) for l in open(fn)]
+    starts = [i for i, r in enumerate(recs) if r.get("event") == "start" and not r.get("dry")]
+    refs = [r for r in recs[:starts[-1]] if r.get("event") == "test" and r.get("run") == "ref"][-2:]
+    last = refs + recs[starts[-1]:]       # session 1e did not repeat the references of the start just before
+    names = {"ref_odil_v11_sim": "ODIL v11, sim-trained (ref.)", "ref_ppo_v3_sim": "PPO v3, sim-trained (ref.)",
+             "odil": "ODIL, rig only", "sac": "SAC, rig only", "ppo": "PPO, rig only"}
+    rows = [["Controller", "Rig data", "Reached", "Time to reach", "Inside after", "Final dist.", "Jerk"]]
+    for r in last:
+        if r.get("event") == "test" and r.get("radius_mm", 12.0) == 12.0:
+            rows.append([names.get(r["method"], r["method"]), f"{r['rig_minutes']:.0f} min", f"{r['reached']}/{r['n']}",
+                         f"{r['t_reach_med']:.1f} s" if r.get("t_reach_med") else "-",
+                         f"{100 * r['inside_after_mean']:.0f} %", f"{r['final_mm_med']:.1f} mm",
+                         f"{r['jerk_med']:.4f}"])
+    return rows
+
+
 def page_deco(c, doc):
     c.saveState()
     c.setFont("Helvetica", 7.5)
@@ -109,7 +128,7 @@ def build():
         table([["Part", "Question", "Status"],
                ["1. Ball on plate, sim -> rig", "Train in a simulator, run on the real plate", "done: ODIL = RL accuracy, 2.5x smoother"],
                ["2. Maze", "Follow the printed route of the real board", "done: real maze solved 3 times"],
-               ["3. Ball on plate, rig only", "How much real rig time does each method need?", "running: dry test passed"]],
+               ["3. Ball on plate, rig only", "How much real rig time does each method need?", "session 1 done for ODIL and SAC; PPO next"]],
               [45 * mm, 70 * mm, W - 115 * mm]),
         Spacer(1, 10 * mm), img(os.path.join(ROOT, "maze", "report_media", "first_finish_070pct_of_video.jpg"), W * 0.8),
         Paragraph("The rig's live view during the first complete run of the real labyrinth (route already done in green).", CAP),
@@ -179,6 +198,17 @@ def build():
                     "delay, lag, camera noise and friction:", P),
           eq("refine", "Tracking error (in units of 5 mm), smoothness, and tilt beyond what a perfect follower would need. "
                        "The gradient flows exactly through the physics -- this is what RL has to estimate from samples."),
+          Paragraph("The version used on the rig", H2),
+          Paragraph("In the rig-only experiment (<font face='Courier'>odil_plate_v9.py</font>, 3 delay stages) the "
+                    "commands are not separate unknowns: the policy produces them inside the physics term (so term 4 is "
+                    "exact). 768 start-target pairs x 41 time points, durations up to 3 s; the end must be a true rest "
+                    "at the target centre; the physics (gain, stiction, level bias, delay) is randomised per trajectory "
+                    "around the values fitted from the rig. About 12 minutes on a 4-core laptop, no GPU.", P),
+          Paragraph("Stiction compensation (not part of ODIL)", H2),
+          Paragraph("A gentle controller cannot always free a resting ball. On the rig a classic add-on helps: if the ball "
+                    "has moved less than 1.5 mm in 0.4 s <b>and is farther than the target radius R</b> from the target, "
+                    "an extra tilt towards the target ramps up (6 deg/s, at most 2 deg) until the ball moves. It is "
+                    "reported separately, and an ablation without it is planned.", P),
           fig("06_method_odil.png", "Figure 4. ODIL trained only from rig data: record, fit the physics, optimise, test; "
                                     "the next round records with the new controller."),
           CondPageBreak(70 * mm)]
@@ -217,8 +247,8 @@ def build():
                     "learning never slows the 29 Hz control loop.", P),
           Paragraph("The three methods in one line each", H2),
           table([["", "Learns from", "Needs a model", "Experience reuse", "Rig time (expected)"],
-                 ["ODIL", "physics fitted to rig data", "yes (fitted)", "-- (optimises through it)", "~30 min per round"],
-                 ["SAC", "rewards on real attempts", "no", "replays everything", "~2-5 h"],
+                 ["ODIL", "physics fitted to rig data", "yes (fitted)", "-- (optimises through it)", "~30 min per round (measured: 60 min)"],
+                 ["SAC", "rewards on real attempts", "no", "replays everything", "~2-5 h (measured: ~2 h)"],
                  ["PPO", "rewards on real attempts", "no", "uses each batch once", "~10-30 h"]],
                 [16 * mm, 45 * mm, 25 * mm, 40 * mm, W - 126 * mm]),
           CondPageBreak(70 * mm)]
@@ -252,30 +282,53 @@ def build():
           fig("12_random_tilts.png", "Figure 12. ODIL's round-0 data from the dry test: random tilts, no controller. The "
                                      "ball covered the whole plate -- too fast (it was lost ~10 % of frames); the real run "
                                      "uses gentler tilts (max 1.75 deg, braking above 15 cm/s).", W * 0.62),
-          Paragraph("Dry test, all phases (2-4 minutes each -- checks the pipeline, not quality)", H2),
-          table(dry_results(), [40 * mm, 18 * mm, 18 * mm, 24 * mm, 22 * mm, 20 * mm, W - 142 * mm]),
-          Spacer(1, 4 * mm),
-          Paragraph("Plan for the paper", H2)]
-    s += bullets(["<b>References</b> each session: the simulation-trained ODIL v11 and PPO v3 on the same targets "
-                  "(drift anchor; links part 1 and part 3).",
-                  "<b>ODIL x 3 runs</b>, <b>SAC x 3 runs</b> (up to 10 h each), <b>PPO x 1 run</b> (up to 30 h), order "
-                  "alternated across sessions.",
-                  "<b>PPO trained in the fitted model</b> from the same rig data (offline): separates 'having a model' "
-                  "from 'how it is optimised'.",
-                  "Report rig minutes, wall-clock and compute time, the learning curves, final quality, smoothness and "
-                  "interventions; say openly that ODIL's recipe was tuned over many versions in simulation."])
+          CondPageBreak(120 * mm),
+          Paragraph("Session 1 results (2026-10-03)", H2),
+          fig("13_learning_curves_session1.png", "Figure 13. Learning on the physical rig only, same 30 targets (12 mm). "
+                                                 "Dashed/dotted: the simulation-trained references."),
+          table(session_results(), [46 * mm, 17 * mm, 19 * mm, 22 * mm, 20 * mm, 20 * mm, W - 144 * mm]),
+          Spacer(1, 3 * mm)]
+    s += bullets(["<b>Rig time to a good controller:</b> ODIL 60 min, SAC about 120 min (28/30 each). Both rig-only "
+                  "ODIL rounds after the first match or beat the simulation-trained ODIL.",
+                  "<b>Smoothness:</b> ODIL's jerk is about 4x lower at every point -- its clearest advantage.",
+                  "<b>Speed and precision:</b> SAC reaches targets about twice as fast and ends closer to the centre "
+                  "(below 5 mm in 17-40 % of trips from 120 min, ODIL 3-23 %).",
+                  "<b>SAC over a long run:</b> best at 120-210 min; since then holding has slowly slipped (inside after "
+                  "92 % -> ~75 %, final 5.5 -> ~9 mm). The full 600 minutes will show whether this is a real decline."])
+    s += [Paragraph("Why ODIL ends a few millimetres off", H3),
+          Paragraph("The rig ODIL aims at the exact centre, but its stiction push only acts while the ball is farther "
+                    "than R. With R = 12 mm a ball stuck 8 mm off gets no more push, and ODIL's gentle tilts stay below "
+                    "the breakaway angle. SAC's reward pulls to the centre at every step. Every controller takes R as an "
+                    "input, so a retest telling all of them R = 5 mm measures precision fairly. (An earlier explanation, "
+                    "'ODIL rests anywhere within R/2', applied only to an older version, v7.)", P),
+          Paragraph("A surface defect: the taped-over hole", H3),
+          Paragraph("In ODIL's first test the ball sat for about 80 s at the plate centre, where the hole is covered by "
+                    "tape (probably a slight dip), despite tilts up to 3.4 deg; all 11 failures came from that spot, and "
+                    "afterwards ODIL reached 15 of 19 targets. A fitted global physics model cannot represent such a "
+                    "local defect, while RL can learn it implicitly -- a fair, documented limitation.", P),
+          Paragraph("Next (queued, runs automatically)", H2),
+          table([["Step", "What", "Rig time", "Why"],
+                 ["1", "SAC to 600 rig minutes", "~4 h", "complete curve, long-run stability"],
+                 ["2", "References, then PPO from scratch", "up to 30 h", "the on-policy curve"],
+                 ["3", "5 mm retest of every saved controller", "~3 h", "precision when every controller is told 5 mm"],
+                 ["4", "Reuse test: ODIL path tracker trained only from the 90 min of ODIL rig data (median 4.5 mm in "
+                       "the fitted model)", "0 to learn, ~15 min to test", "learn the physics once, solve new tasks"],
+                 ["5", "SAC learning path tracking on the rig", "measured", "the RL cost of a new task"],
+                 ["later", "Repeat sessions (alternating order), ODIL without stiction push, PPO in the fitted model",
+                  "~2 days", "statistics, ablation, model vs optimiser"]],
+                [12 * mm, 70 * mm, 30 * mm, W - 112 * mm])]
     s += [CondPageBreak(70 * mm)]
 
     # ---- 8 maze ----
-    s += [Paragraph("8. Part 2 in pictures: the real labyrinth", H1),
+    s += [PageBreak(), Paragraph("8. Part 2 in pictures: the real labyrinth", H1),
           Paragraph("The ODIL path tracker follows the board's printed route at 2.5 cm/s. The route, the holes and a wall "
                     "map are extracted from a photo of the board; a planner can also find the safest line through the "
                     "corridors. The rig completed the real maze 3 times (first: 172 s); a typical run reaches about a "
                     "quarter of the route, and most falls come from arriving at bends 2-3x too fast.", P),
           img(os.path.join(ROOT, "maze", "report_media", "first_finish_099pct_of_video.jpg"), W * 0.8),
-          Paragraph("Figure 13. End of the first complete run: the whole route green, the ball at the finish.", CAP),
+          Paragraph("Figure 14. End of the first complete run: the whole route green, the ball at the finish.", CAP),
           img(os.path.join(ROOT, "maze", "report_media", "route_map_printed_vs_safe.png"), W * 0.8),
-          Paragraph("Figure 14. Walls (grey), holes (red), the printed route (green) and the planned safe route (blue).", CAP)]
+          Paragraph("Figure 15. Walls (grey), holes (red), the printed route (green) and the planned safe route (blue).", CAP)]
 
     doc = SimpleDocTemplate(OUT, pagesize=A4, leftMargin=18 * mm, rightMargin=18 * mm, topMargin=16 * mm,
                             bottomMargin=18 * mm, title="CyberRunner: ODIL vs RL -- visual guide", author="dimikoumou")
