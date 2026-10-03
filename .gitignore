@@ -115,3 +115,4 @@ last_goal.json
 bias_table.json
 .venv-rl/
 physical_training/data/
+physical_training/report/preview/

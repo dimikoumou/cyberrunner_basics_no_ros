@@ -143,7 +143,7 @@ ANGLE_GUARD_DEG = 7.0
 # the level position found (camera, trusted pose) in THIS session -- a wrong camera reading can
 # then no longer drive a motor to its tick limit.
 MOTOR_CAP_DEG = 8.0
-MOTOR_CAP_TICKS_MAX = 1200    # never more than this from level, whatever the measured response says
+MOTOR_CAP_TICKS_MAX = int(os.environ.get("PLATE_CAP_TICKS", "1200"))   # never more than this from level, whatever the measured response says
 STALL_TICKS = 10 ** 9   # (tick-count stall guard disabled)
 STALL_GAIN_DEG = 0.3
 STALL_RETARGET_DEG = 2.0   # a new command (target moved this much) is a fresh attempt
@@ -1388,8 +1388,24 @@ class HardwarePlateEnv(gym.Env):
             jump = float(np.hypot(xb - self._prev_ball[0], yb - self._prev_ball[1]))
             allow = max(0.012, 3.0 * getattr(self, "_prev_speed", 0.0) * max(time.time() - self._prev_t, self.dt) + 0.006)
             if jump > allow:
-                print(f"[HardwarePlateEnv] ignoring implausible ball jump of {jump * 1000:.0f} mm")
-                ball_found = False
+                # a glitch is one frame; a ball that really is somewhere else (moved while not
+                # tracked, put back by hand) is seen there frame after frame -- after 5 consistent
+                # frames accept it (2026-10-02: the filter rejected a real ball forever)
+                cand = getattr(self, "_jump_cand", None)
+                if cand is not None and np.hypot(xb - cand[0], yb - cand[1]) < 0.006:
+                    self._jump_n = getattr(self, "_jump_n", 0) + 1
+                else:
+                    self._jump_cand, self._jump_n = (xb, yb), 1
+                if self._jump_n >= 5:
+                    print(f"[HardwarePlateEnv] ball re-acquired {jump * 1000:.0f} mm away (seen there 5 frames)")
+                    self._jump_cand, self._jump_n = None, 0
+                    self._prev_speed = 0.0
+                    self._prev_ball = np.array([xb, yb], dtype=np.float32)   # no fake jump velocity
+                else:
+                    print(f"[HardwarePlateEnv] ignoring implausible ball jump of {jump * 1000:.0f} mm")
+                    ball_found = False
+            else:
+                self._jump_cand, self._jump_n = None, 0
         self._step_count += 1
         self._lost_count = 0 if ball_found else self._lost_count + 1
 

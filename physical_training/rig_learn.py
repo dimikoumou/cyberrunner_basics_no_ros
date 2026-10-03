@@ -38,6 +38,9 @@ import zlib
 
 import numpy as np
 
+# no controller here asks for more than 4 deg (~800 ticks at ~200 ticks/deg); the default cap of
+# 1200 ticks (~6 deg) let an untrained PPO ramp motor 1 by 1439 ticks in the dry run (watchdog stop)
+os.environ.setdefault("PLATE_CAP_TICKS", "1000")
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, ".."))
 SIM = os.path.join(ROOT, "rl_sim")
@@ -94,6 +97,10 @@ class Rig:
 
     def shutdown(self, why):
         print("SHUTDOWN:", why, flush=True)
+        try:
+            self.stop_csv()
+        except Exception:
+            pass
         from state_est_control import ADDR_TORQUE_ENABLE
         for k in (1, 3):
             try:
@@ -117,9 +124,12 @@ class Rig:
             self.csv.writerow([f"{time.time() - self.t_csv:.4f}", 1, int(self.k_csv), *(f"{v:.5f}" for v in obs[:6]),
                                f"{a[0]:.4f}", f"{a[1]:.4f}", int(found), "running" if found else "lost", tag])
             self.k_csv += 1
+            if self.k_csv % 300 == 0:
+                self.fcsv.flush()                     # a hard stop must not lose the last seconds
         return np.array(obs[:2], float), np.array(obs[2:4], float), float(obs[4]), float(obs[5]), found, jerk
 
     def start_csv(self, name):
+        self.stop_csv()
         os.makedirs(DATA, exist_ok=True)
         fn = os.path.join(DATA, f"{name}.csv")
         self.fcsv = open(fn, "w", newline="")
@@ -167,9 +177,13 @@ class RandomTilts:
         self.u = np.zeros(2)
 
     def __call__(self, goal, radius, pos, vel, alpha, beta):
-        self.u += -self.u * DT / 1.0 + 0.35 * np.sqrt(DT) * self.rng.normal(size=2)
-        back = np.where(np.abs(pos) > [0.10, 0.08], -np.sign(pos) * 0.3, 0.0)
-        return np.clip(self.u + back, -0.6, 0.6)
+        # dry run 2026-10-02: +-0.6 (3 deg) raced the ball frame to frame (lost ~10 % of frames,
+        # most time against the frame) -> gentler: +-0.35, pull back from 7 cm, brake above 15 cm/s
+        self.u += -self.u * DT / 1.5 + 0.2 * np.sqrt(DT) * self.rng.normal(size=2)
+        back = np.clip(-(np.abs(pos) > [0.07, 0.055]) * np.sign(pos) * 4.0 * (np.abs(pos) - [0.07, 0.055]), -0.3, 0.3)
+        sp = float(np.hypot(*vel))
+        brake = -0.25 * vel / sp * min(1.0, (sp - 0.15) / 0.1) if sp > 0.15 else 0.0
+        return np.clip(self.u + back + brake, -0.35, 0.35)
 
 
 class ODILCtl:
@@ -299,7 +313,8 @@ def test(rig, ctl, name, rig_minutes, n=30, seed=2027, run=None):
            "jerk_med": float(np.median([r["jerk"] for r in R if r["jerk"] is not None])),
            "trips": R}
     log({k: v for k, v in rec.items() if k != "trips"})
-    with open(os.path.join(DATA, f"test_{run or name}_{int(rig_minutes)}min.json"), "w") as f:
+    os.makedirs(DATA, exist_ok=True)
+    with open(os.path.join(DATA, f"test_{run}_{name}_{int(rig_minutes)}min.json"), "w") as f:
         json.dump(rec, f)
     return rec
 
@@ -452,6 +467,7 @@ def main():
     if a.dry:
         a.odil_rounds, a.odil_min, a.sac_hours, a.sac_test_min = 1, 2, 4 / 60, 2
         a.ppo_hours, a.ppo_test_min = 4 / 60, 2
+    os.makedirs(DATA, exist_ok=True)
     rig = Rig()
     log({"event": "start", "plan": a.plan, "dry": a.dry, "start_ticks": rig.start_ticks, "holes": len(rig.holes)})
     count = {}
@@ -461,16 +477,24 @@ def main():
             run = f"{phase}{count[phase]}" + ("_dry" if a.dry else "")
             rng = np.random.default_rng(zlib.crc32(run.encode()))       # each run its own, reproducible seed
             log({"event": "phase", "run": run})
+            if phase in ("ref", "sac", "ppo"):
+                rig.start_csv(run)                     # everything recorded (ODIL starts its own per round)
             if phase == "ref":
                 references(rig, a.dry)
             elif phase == "odil":
+                rig.stop_csv()
                 odil_rounds(rig, a.odil_rounds, a.odil_min, rng, a.dry, run)
             elif phase in ("sac", "ppo"):
                 hours = a.sac_hours if phase == "sac" else a.ppo_hours
                 rl(rig, phase, hours, a.sac_test_min if phase == "sac" else a.ppo_test_min, rng, a.dry, run)
+        rig.stop_csv()
         log({"event": "done"})
-    finally:
         rig.shutdown("finished")
+    except BaseException as e:
+        import traceback
+        traceback.print_exc()
+        log({"event": "error", "error": repr(e), "trace": traceback.format_exc()[-1500:]})
+        rig.shutdown(f"error: {e!r}")
 
 
 if __name__ == "__main__":
