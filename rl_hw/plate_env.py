@@ -1416,13 +1416,16 @@ class HardwarePlateEnv(gym.Env):
                 # a glitch is one frame; a ball that really is somewhere else (moved while not
                 # tracked, put back by hand) is seen there frame after frame -- after 5 consistent
                 # frames accept it (2026-10-02: the filter rejected a real ball forever)
+                # 2026-10-03: the candidate must FOLLOW a rolling ball (<= 20 mm per frame, ~0.6 m/s):
+                # "5 frames within 6 mm of the first sighting" never re-acquired a moving ball, and
+                # untrained PPO (fast tilts) saw the ball only 58-80 % of the time (SAC: 98-100 %)
                 cand = getattr(self, "_jump_cand", None)
-                if cand is not None and np.hypot(xb - cand[0], yb - cand[1]) < 0.006:
-                    self._jump_n = getattr(self, "_jump_n", 0) + 1
+                if cand is not None and np.hypot(xb - cand[0], yb - cand[1]) < 0.020:
+                    self._jump_cand, self._jump_n = (xb, yb), getattr(self, "_jump_n", 0) + 1
                 else:
                     self._jump_cand, self._jump_n = (xb, yb), 1
-                if self._jump_n >= 5:
-                    print(f"[HardwarePlateEnv] ball re-acquired {jump * 1000:.0f} mm away (seen there 5 frames)")
+                if self._jump_n >= 3:
+                    print(f"[HardwarePlateEnv] ball re-acquired {jump * 1000:.0f} mm away (followed 3 frames)")
                     self._jump_cand, self._jump_n = None, 0
                     self._prev_speed = 0.0
                     self._prev_ball = np.array([xb, yb], dtype=np.float32)   # no fake jump velocity
