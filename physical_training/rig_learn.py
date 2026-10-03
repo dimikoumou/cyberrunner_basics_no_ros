@@ -315,17 +315,19 @@ def drive(rig, ctl, minutes, rng, tag, goal_s=6.0):
     return driven / 60.0
 
 
-def test(rig, ctl, name, rig_minutes, n=30, seed=2027, run=None):
-    """the same n targets for every controller -> metrics, logged with the rig minutes"""
+def test(rig, ctl, name, rig_minutes, n=30, seed=2027, run=None, r=R_TEST):
+    """the same n targets for every controller -> metrics, logged with the rig minutes; `r` is the
+    target radius the controller is told and that counts as reached (12 mm unless a retest)"""
+    tag = "" if abs(r - R_TEST) < 1e-9 else f"_r{1000 * r:.0f}mm"
     rng = np.random.default_rng(seed)
     targets = [random_target(rng, rig) for _ in range(n)]
     R = []
     prev_csv = rig.csv is not None
     if not prev_csv:                                  # tests are recorded too: any tolerance can be
-        rig.start_csv(f"test_{run}_{name}_{int(rig_minutes)}min")   # evaluated afterwards
+        rig.start_csv(f"test_{run}_{name}_{int(rig_minutes)}min{tag}")   # evaluated afterwards
     for k_, g in enumerate(targets):
         rig.env.goal = g.astype(np.float32)
-        rig.show(g, R_TEST, f"test {name}: target {k_ + 1}/{n}")
+        rig.show(g, r, f"test {name}{tag}: target {k_ + 1}/{n}")
         ctl.reset()
         t0, t_in, inside, jerks, lost = time.time(), None, [], [], False
         dists, times = [], []
@@ -339,19 +341,19 @@ def test(rig, ctl, name, rig_minutes, n=30, seed=2027, run=None):
                 break
             if t_in is not None and t - t_in > 4.0:
                 break
-            a = ctl(g, R_TEST, pos, vel, al, be)
+            a = ctl(g, r, pos, vel, al, be)
             pos, vel, al, be, found, j = rig.step(a, "test")
             jerks.append(j)
             d = float(np.hypot(*(g - pos)))
             dists.append(d)
             times.append(time.time() - t0)
-            if t_in is None and d < R_TEST:
+            if t_in is None and d < r:
                 t_in = time.time() - t0
             elif t_in is not None:
-                inside.append(d < R_TEST)
+                inside.append(d < r)
         R.append({"target": [float(g[0]), float(g[1])], "min_mm": 1000 * float(min(dists)) if dists else None,
                   "t_within": {str(tol): next((tt for tt, dd in zip(times, dists) if dd < tol / 1000), None)
-                               for tol in (10, 15, 20, 30)},
+                               for tol in (5, 10, 15, 20, 30)},
                   "reached": t_in is not None, "t_reach": t_in, "lost": lost,
                   "inside_after": float(np.mean(inside)) if inside else 0.0,
                   "final_mm": 1000 * float(np.hypot(*(g - pos))) if found else None,
@@ -361,7 +363,7 @@ def test(rig, ctl, name, rig_minutes, n=30, seed=2027, run=None):
     if not prev_csv:
         rig.stop_csv()
     ok = [r for r in R if r["reached"]]
-    rec = {"event": "test", "method": name, "run": run, "rig_minutes": round(rig_minutes, 1), "n": n,
+    rec = {"event": "test", "method": name, "run": run, "radius_mm": round(1000 * r, 1), "rig_minutes": round(rig_minutes, 1), "n": n,
            "reached": len(ok), "lost": sum(r["lost"] for r in R),
            "t_reach_med": float(np.median([r["t_reach"] for r in ok])) if ok else None,
            "inside_after_mean": float(np.mean([r["inside_after"] for r in ok])) if ok else 0.0,
@@ -370,7 +372,7 @@ def test(rig, ctl, name, rig_minutes, n=30, seed=2027, run=None):
            "trips": R}
     log({k: v for k, v in rec.items() if k != "trips"})
     os.makedirs(DATA, exist_ok=True)
-    with open(os.path.join(DATA, f"test_{run}_{name}_{int(rig_minutes)}min.json"), "w") as f:
+    with open(os.path.join(DATA, f"test_{run}_{name}_{int(rig_minutes)}min{tag}.json"), "w") as f:
         json.dump(rec, f)
     return rec
 
@@ -510,6 +512,36 @@ def rl(rig, algo, hours, test_min, rng, dry, run="sac1"):
     return model
 
 
+# ---- retest: every saved policy again at a SMALL target ---------------------------------------
+def retest(rig, r, dry, max_per_run=12):
+    """the precision question (2026-10-03): ODIL is trained to rest anywhere inside 0.5 R, SAC/PPO are
+    pulled to the centre by -d/0.1 -> at 12 mm they answer different questions. Both take the radius
+    as an input, so tell every saved policy 'the target is r' on the same 30 targets."""
+    import glob
+    import re
+    from stable_baselines3 import SAC, PPO
+    n = 6 if dry else 30
+    test(rig, ODILCtl(os.path.join(SIM, "runs", "odil_v11", "odil_policy.npz")), "ref_odil_v11_sim", 0, n=n, run="ref", r=r)
+    test(rig, SimPPOCtl(os.path.join(SIM, "runs", "plate_goal_v3", "policy_final.npz")), "ref_ppo_v3_sim", 0, n=n, run="ref", r=r)
+    for d in sorted(glob.glob(os.path.join(SIM, "runs", "odil*_rig_r*"))):
+        m = re.match(r"(odil\d+)_rig_r(\d+)$", os.path.basename(d))
+        if m and os.path.exists(os.path.join(d, "odil_policy.npz")):
+            test(rig, ODILCtl(os.path.join(d, "odil_policy.npz")), "odil", 30.0 * (int(m.group(2)) + 1), n=n,
+                 run=m.group(1), r=r)
+    for d in sorted(glob.glob(os.path.join(SIM, "runs", "*_rig"))):
+        m = re.match(r"((sac|ppo)\d+)_rig$", os.path.basename(d))
+        if not m:
+            continue
+        ck = sorted(((int(re.search(r"_(\d+)min", p).group(1)), p) for p in glob.glob(os.path.join(d, "*min.zip"))))
+        if len(ck) > max_per_run:                      # evenly spread, always the last one
+            idx = sorted(set(np.linspace(0, len(ck) - 1, max_per_run).round().astype(int)))
+            ck = [ck[i] for i in idx]
+        algo = m.group(2)
+        for mins, p in ck:
+            model = (SAC if algo == "sac" else PPO).load(p, device="cpu")
+            test(rig, SACCtl(model), algo, mins, n=n, run=m.group(1), r=r)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--plan", default="ref,odil,sac")
@@ -519,6 +551,7 @@ def main():
     ap.add_argument("--odil-min", type=float, default=30)
     ap.add_argument("--sac-hours", type=float, default=6)
     ap.add_argument("--sac-test-min", type=float, default=30)
+    ap.add_argument("--retest-mm", type=float, default=5)
     ap.add_argument("--dry", action="store_true")
     a = ap.parse_args()
     if a.dry:
@@ -541,6 +574,8 @@ def main():
             elif phase == "odil":
                 rig.stop_csv()
                 odil_rounds(rig, a.odil_rounds, a.odil_min, rng, a.dry, run)
+            elif phase == "retest":
+                retest(rig, a.retest_mm / 1000.0, a.dry)
             elif phase in ("sac", "ppo"):
                 hours = a.sac_hours if phase == "sac" else a.ppo_hours
                 rl(rig, phase, hours, a.sac_test_min if phase == "sac" else a.ppo_test_min, rng, a.dry, run)
