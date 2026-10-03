@@ -15,7 +15,8 @@ Branch: `ball-on-plate`. Git author for commits: `dimikoumou <dimi0330@icloud.co
 
 1. **Ball on plate, simulation -> rig**: `rl_sim/` trains (classic, RL, ODIL), `rl_hw/` runs it.
 2. **Maze**: line following, the printed route on the real labyrinth board, the learning loop.
-3. **Ball on plate trained only on the rig**: [`physical_training/`](physical_training/README.md).
+3. **Ball on plate trained only on the rig**: [`physical_training/`](physical_training/README.md). Report with equations
+   and results: [`physical_training/REPORT.md`](physical_training/REPORT.md).
 
 ## Layout
 

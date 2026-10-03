@@ -1,5 +1,7 @@
 # Part 3 -- ball on plate, trained only on the physical rig
 
+**Full report with all equations and results: [`REPORT.md`](REPORT.md).**
+
 **Question:** how much real rig time do ODIL and RL need to learn ball-on-plate when nothing comes
 from a hand-made simulator?
 

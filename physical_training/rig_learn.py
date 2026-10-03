@@ -514,9 +514,10 @@ def rl(rig, algo, hours, test_min, rng, dry, run="sac1"):
 
 # ---- retest: every saved policy again at a SMALL target ---------------------------------------
 def retest(rig, r, dry, max_per_run=12):
-    """the precision question (2026-10-03): ODIL is trained to rest anywhere inside 0.5 R, SAC/PPO are
-    pulled to the centre by -d/0.1 -> at 12 mm they answer different questions. Both take the radius
-    as an input, so tell every saved policy 'the target is r' on the same 30 targets."""
+    """the precision question (2026-10-03): ODIL's breakaway boost (stiction compensation) only acts
+    while the ball is still and further out than R, so at R = 12 mm a ball stuck ~8 mm off is left
+    there (ODIL v9 itself aims at the centre: ODIL_END_FREE = 0); SAC/PPO are pulled to the centre by
+    -d/0.1. All take the radius as an input -> tell every saved policy 'the target is r'."""
     import glob
     import re
     from stable_baselines3 import SAC, PPO
