@@ -41,6 +41,7 @@ import numpy as np
 # no controller here asks for more than 4 deg (~800 ticks at ~200 ticks/deg); the default cap of
 # 1200 ticks (~6 deg) let an untrained PPO ramp motor 1 by 1439 ticks in the dry run (watchdog stop)
 os.environ.setdefault("PLATE_CAP_TICKS", "1000")
+os.environ.setdefault("PLATE_MARKER_GUARD_M", "0.045")   # ball within 4.5 cm of a plate marker: pose not used
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, ".."))
 SIM = os.path.join(ROOT, "rl_sim")
@@ -123,6 +124,12 @@ class Rig:
         """apply an env action (|a| <= 1, x 5 deg); -> (pos, vel, alpha, beta, found)"""
         self.check()
         a = np.clip(np.asarray(action, dtype=float), -1, 1)
+        # corner shield (every controller): near a plate marker the tilt reading cannot be trusted
+        # (see plate_env MARKER_GUARD_M) -> steer the ball out towards the middle, open loop
+        p = getattr(self, "last_pos", None)
+        if p is not None and np.hypot(abs(p[0]) - 0.14175, abs(p[1]) - 0.11925) < 0.06:
+            a = -np.sign(p) * 0.35
+            self.shield_n = getattr(self, "shield_n", 0) + 1
         obs, _, _, _, info = self.env.step(a.astype(np.float32))
         found = bool(info.get("ball_found", info.get("status") != "ball_lost"))
         # a frame or two without the ball (camera hiccup, edge) is not a lost ball: hold the last

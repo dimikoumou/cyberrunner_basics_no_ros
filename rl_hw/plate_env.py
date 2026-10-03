@@ -143,7 +143,8 @@ ANGLE_GUARD_DEG = 7.0
 # the level position found (camera, trusted pose) in THIS session -- a wrong camera reading can
 # then no longer drive a motor to its tick limit.
 MOTOR_CAP_DEG = 8.0
-MOTOR_CAP_TICKS_MAX = int(os.environ.get("PLATE_CAP_TICKS", "1200"))   # never more than this from level, whatever the measured response says
+MOTOR_CAP_TICKS_MAX = int(os.environ.get("PLATE_CAP_TICKS", "1200"))
+MARKER_GUARD_M = float(os.environ.get("PLATE_MARKER_GUARD_M", "0"))   # see _read_state   # never more than this from level, whatever the measured response says
 STALL_TICKS = 10 ** 9   # (tick-count stall guard disabled)
 STALL_GAIN_DEG = 0.3
 STALL_RETARGET_DEG = 2.0   # a new command (target moved this much) is a fresh attempt
@@ -668,6 +669,17 @@ class HardwarePlateEnv(gym.Env):
         # a plate marker not found this frame -> the detector used the middle of its search
         # window: the tilt is wrong, so the servo must not correct on it (see _servo_tilt)
         self._pose_ok = not bool(getattr(self.pipeline.measurements.detector, "corners_missing", False))
+        # ball next to a plate marker (2026-10-03, twice in rig_learn): the bluish ball is taken for
+        # the marker, the tilt reading is wrong by 2-10 deg (below the 6 deg plausibility check for
+        # most of it) and the servo drove both motors ~1000 ticks. While the ball is within
+        # MARKER_GUARD_M of a marker the pose of that frame is not used at all: no correction, no
+        # level-reference update, the controller sees the last good tilt. Off unless set (rig_learn).
+        if MARKER_GUARD_M > 0 and ball_found and np.hypot(abs(xb) - self._x_half, abs(yb) - self._y_half) < MARKER_GUARD_M:
+            self._pose_ok = False
+            self.ball_at_marker = True
+            a0, b0 = self._last_plausible_tilt
+            return xb, yb, a0, b0, ball_found
+        self.ball_at_marker = False
         # Defense in depth: a mis-detected blob (e.g. a large false-positive region
         # under bad lighting getting through the ball detector) can still produce a
         # numeric, non-NaN position -- just a physically impossible one. Observed
