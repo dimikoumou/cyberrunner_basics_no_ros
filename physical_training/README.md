@@ -14,7 +14,7 @@ from a hand-made simulator?
   the rig minutes of training data -> `phase3_logs/rig_learn.jsonl`.
 
 Expected from earlier measurements (to be confirmed by this experiment): ODIL about 30 min of rig
-data per round; RL (SAC) about 2-5 h; PPO about 10-30 h (not run: too long for a night).
+data per round; RL (SAC) about 2-5 h; PPO about 10-30 h.
 
 ## Full experiment (multi-day; the rig can run unattended)
 
