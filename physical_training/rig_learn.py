@@ -290,7 +290,10 @@ def drive(rig, ctl, minutes, rng, tag, goal_s=6.0):
         if t - t_goal > goal_s:
             goal, t_goal = random_target(rng, rig), t
             rig.env.goal = goal.astype(np.float32)
-            rig.show(goal, R_TEST, tag)
+            if not isinstance(ctl, RandomTilts):
+                rig.show(goal, R_TEST, tag)
+            else:
+                rig.ui.set_overlay(goal_px=None, goal_r_px=None)
         if rig.obs is None:
             pos, vel, al, be, found, _ = rig.step(np.zeros(2), tag)
         else:
@@ -312,11 +315,15 @@ def test(rig, ctl, name, rig_minutes, n=30, seed=2027, run=None):
     rng = np.random.default_rng(seed)
     targets = [random_target(rng, rig) for _ in range(n)]
     R = []
+    prev_csv = rig.csv is not None
+    if not prev_csv:                                  # tests are recorded too: any tolerance can be
+        rig.start_csv(f"test_{run}_{name}_{int(rig_minutes)}min")   # evaluated afterwards
     for k_, g in enumerate(targets):
         rig.env.goal = g.astype(np.float32)
         rig.show(g, R_TEST, f"test {name}: target {k_ + 1}/{n}")
         ctl.reset()
         t0, t_in, inside, jerks, lost = time.time(), None, [], [], False
+        dists, times = [], []
         pos, vel, al, be, found, _ = rig.step(np.zeros(2), "test")
         while True:
             if not found:
@@ -331,16 +338,23 @@ def test(rig, ctl, name, rig_minutes, n=30, seed=2027, run=None):
             pos, vel, al, be, found, j = rig.step(a, "test")
             jerks.append(j)
             d = float(np.hypot(*(g - pos)))
+            dists.append(d)
+            times.append(time.time() - t0)
             if t_in is None and d < R_TEST:
                 t_in = time.time() - t0
             elif t_in is not None:
                 inside.append(d < R_TEST)
-        R.append({"reached": t_in is not None, "t_reach": t_in, "lost": lost,
+        R.append({"target": [float(g[0]), float(g[1])], "min_mm": 1000 * float(min(dists)) if dists else None,
+                  "t_within": {str(tol): next((tt for tt, dd in zip(times, dists) if dd < tol / 1000), None)
+                               for tol in (10, 15, 20, 30)},
+                  "reached": t_in is not None, "t_reach": t_in, "lost": lost,
                   "inside_after": float(np.mean(inside)) if inside else 0.0,
                   "final_mm": 1000 * float(np.hypot(*(g - pos))) if found else None,
                   "jerk": float(np.mean(jerks)) if jerks else None})
         if lost:
             rig.reload()
+    if not prev_csv:
+        rig.stop_csv()
     ok = [r for r in R if r["reached"]]
     rec = {"event": "test", "method": name, "run": run, "rig_minutes": round(rig_minutes, 1), "n": n,
            "reached": len(ok), "lost": sum(r["lost"] for r in R),
