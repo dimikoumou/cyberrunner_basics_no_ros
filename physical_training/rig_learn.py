@@ -56,6 +56,7 @@ LOG = os.path.join(ROOT, "phase3_logs", "rig_learn.jsonl")
 DATA = os.path.join(HERE, "data")                      # rig recordings + test results (not in git)
 LEVEL = (-1.1, 2.55)                     # (alpha, beta) deg, as in rl_policy / sysid_rig
 GOAL_X, GOAL_Y, R_TEST = 0.09, 0.07, 0.012
+SAC_BUFFER = 1_000_000                     # replay memory (steps); --sac-buffer
 WATCH_TICKS = 1300
 DT = 1.0 / 29.0
 
@@ -480,7 +481,7 @@ def rl(rig, algo, hours, test_min, rng, dry, run="sac1"):
     env = RigGoalEnv()
     seed = int(rng.integers(1 << 30))
     if algo == "sac":
-        model = SAC("MlpPolicy", env, learning_rate=3e-4, buffer_size=300_000, batch_size=256,
+        model = SAC("MlpPolicy", env, learning_rate=3e-4, buffer_size=SAC_BUFFER, batch_size=256,
                     gamma=0.99, tau=0.005, learning_starts=60 if dry else 5_000,
                     train_freq=(1, "episode"), gradient_steps=-1,   # updates between episodes, plate level
                     policy_kwargs=dict(net_arch=[256, 256]), verbose=0, device="cpu", seed=seed)
@@ -553,14 +554,19 @@ def main():
     ap.add_argument("--sac-hours", type=float, default=6)
     ap.add_argument("--sac-test-min", type=float, default=30)
     ap.add_argument("--retest-mm", type=float, default=5)
+    # session 1 used 300k (= ~172 min of driving, from rl_sim/train_sac.py) and declined after ~240 min;
+    # 1M is the stable-baselines3 default (~575 min) -> tests whether FIFO forgetting caused it
+    ap.add_argument("--sac-buffer", type=int, default=1_000_000)
     ap.add_argument("--dry", action="store_true")
     a = ap.parse_args()
+    global SAC_BUFFER
+    SAC_BUFFER = a.sac_buffer
     if a.dry:
         a.odil_rounds, a.odil_min, a.sac_hours, a.sac_test_min = 1, 2, 4 / 60, 2
         a.ppo_hours, a.ppo_test_min = 4 / 60, 2
     os.makedirs(DATA, exist_ok=True)
     rig = Rig()
-    log({"event": "start", "plan": a.plan, "dry": a.dry, "start_ticks": rig.start_ticks, "holes": len(rig.holes)})
+    log({"event": "start", "plan": a.plan, "dry": a.dry, "sac_buffer": SAC_BUFFER, "start_ticks": rig.start_ticks, "holes": len(rig.holes)})
     count = {}
     try:
         for phase in a.plan.split(","):
