@@ -195,7 +195,8 @@ class RandomTilts:
         # dry run 2026-10-02: +-0.6 (3 deg) raced the ball frame to frame (lost ~10 % of frames,
         # most time against the frame) -> gentler: +-0.35, pull back from 7 cm, brake above 15 cm/s
         self.u += -self.u * DT / 1.5 + 0.2 * np.sqrt(DT) * self.rng.normal(size=2)
-        back = np.clip(-(np.abs(pos) > [0.07, 0.055]) * np.sign(pos) * 4.0 * (np.abs(pos) - [0.07, 0.055]), -0.3, 0.3)
+        over = np.maximum(np.abs(pos) - np.array([0.07, 0.055]), 0.0)          # how far past 7 / 5.5 cm
+        back = np.clip(-np.sign(pos) * 4.0 * over, -0.3, 0.3)
         sp = float(np.hypot(*vel))
         brake = -0.25 * vel / sp * min(1.0, (sp - 0.15) / 0.1) if sp > 0.15 else 0.0
         return np.clip(self.u + back + brake, -0.35, 0.35)
