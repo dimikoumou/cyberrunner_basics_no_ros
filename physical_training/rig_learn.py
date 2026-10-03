@@ -173,8 +173,13 @@ class Rig:
         # (see plate_env MARKER_GUARD_M) -> steer the ball out towards the middle, open loop
         p = getattr(self, "last_pos", None)
         if p is not None and np.hypot(abs(p[0]) - 0.14175, abs(p[1]) - 0.11925) < 0.06:
-            a = -np.sign(p) * 0.35
+            # ramp (2026-10-03, PPO): a ball resting in the corner against two walls stayed 263 s at a
+            # constant 1.4 deg away-tilt (stiction ~1.6 deg) -> 1.4 deg rising 1 deg/s to 3.2 deg
+            self.shield_t = getattr(self, "shield_t", 0.0) + DT
+            a = -np.sign(p) * min(0.8, 0.35 + 0.25 * self.shield_t)
             self.shield_n = getattr(self, "shield_n", 0) + 1
+        else:
+            self.shield_t = 0.0
         obs, _, _, _, info = self.env.step(a.astype(np.float32))
         found = bool(info.get("ball_found", info.get("status") != "ball_lost"))
         # a frame or two without the ball (camera hiccup, edge) is not a lost ball: hold the last
