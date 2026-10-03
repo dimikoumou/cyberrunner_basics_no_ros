@@ -78,6 +78,11 @@ class Rig:
         self.env.recover_tilts = False
         self.start_ticks = dict(self.env._cmd_ticks)
         self.holes = detect_holes_stable(self.env)
+        # live view for the phone relay (rl_hw/remote_view.py reads :8000): camera image + the target
+        from ui_server import UIServer
+        self.ui = UIServer(8000)
+        self.env.frame_callback = self.ui.publish_frame
+        self.ui.set_state(running=True, mode="click")
         self.csv = None
         self.applied_prev = np.zeros(2)
         self.obs = None
@@ -140,6 +145,20 @@ class Rig:
             if self.k_csv % 300 == 0:
                 self.fcsv.flush()                     # a hard stop must not lose the last seconds
         return np.array(obs[:2], float), np.array(obs[2:4], float), float(obs[4]), float(obs[5]), found, jerk
+
+    def show(self, goal, r=R_TEST, text=""):
+        """draw the current target on the live view (green circle)"""
+        from goal_circle import plate_to_pixel
+        try:
+            a = plate_to_pixel(self.env, np.asarray(goal, float))
+            b = plate_to_pixel(self.env, np.asarray(goal, float) + [r, 0.0])
+            if a is not None and b is not None:
+                self.ui.set_overlay(goal_px=(float(a[1]), float(a[0])),
+                                    goal_r_px=float(np.hypot(b[0] - a[0], b[1] - a[1])))
+            if text:
+                self.ui.set_state(hole_msg=text)
+        except Exception:
+            pass
 
     def start_csv(self, name):
         self.stop_csv()
@@ -271,6 +290,7 @@ def drive(rig, ctl, minutes, rng, tag, goal_s=6.0):
         if t - t_goal > goal_s:
             goal, t_goal = random_target(rng, rig), t
             rig.env.goal = goal.astype(np.float32)
+            rig.show(goal, R_TEST, tag)
         if rig.obs is None:
             pos, vel, al, be, found, _ = rig.step(np.zeros(2), tag)
         else:
@@ -292,8 +312,9 @@ def test(rig, ctl, name, rig_minutes, n=30, seed=2027, run=None):
     rng = np.random.default_rng(seed)
     targets = [random_target(rng, rig) for _ in range(n)]
     R = []
-    for g in targets:
+    for k_, g in enumerate(targets):
         rig.env.goal = g.astype(np.float32)
+        rig.show(g, R_TEST, f"test {name}: target {k_ + 1}/{n}")
         ctl.reset()
         t0, t_in, inside, jerks, lost = time.time(), None, [], [], False
         pos, vel, al, be, found, _ = rig.step(np.zeros(2), "test")
@@ -401,6 +422,7 @@ def rl(rig, algo, hours, test_min, rng, dry, run="sac1"):
                 rig.reload()
             self.goal, self.radius = random_target(rng, rig), float(rng.uniform(0.008, 0.03))
             rig.env.goal = self.goal.astype(np.float32)
+            rig.show(self.goal, self.radius, f"{algo} learning: {self.driven / 60:.0f} rig min")
             self.applied, self.hist, self.k = np.zeros(2), [np.zeros(2)] * N_HIST, 0
             pos, vel, al, be, found, _ = rig.step(np.zeros(2), "sac")
             self.state = (pos, vel, al, be)
