@@ -486,6 +486,7 @@ $$
   99.7 %), so the plate and camera did not drift. **Caveat:** these are single tests per checkpoint,
   and PPO's curve (12.1b) shows that one RL test can swing by 20-30 points of "inside". The back-to-back
   retest of all saved checkpoints (13) is needed before calling it a decline.
+  **Update (12.1c):** the back-to-back retest at 5 mm shows no decline (28-29/30 from 330 to 510 min).
 - **Both rig-only ODIL rounds after the first match or beat the sim-trained ODIL** (26/30, 9.8 mm).
   Learning only from the rig did not cost quality.
 
@@ -507,6 +508,53 @@ One run from zero (earlier attempts with software problems are archived, see 13a
   plate, camera and motors were stable throughout (level within 0.25 deg, ball seen 100 %).
 - **Smoothness** is the same as SAC's (jerk ~0.018), about 4x ODIL's.
 - No camera re-level was needed during this run (the motor-3 creep came with the earlier ping-pong).
+
+### 12.1c Precision: every saved controller told "the target is 5 mm" (2026-10-04, back to back)
+
+Same 30 targets; each controller gets R = 5 mm as its input and only 5 mm counts as reached. All
+checkpoints were tested one after another on the same rig state (taped surface), so these curves are
+free of the hour-to-hour drift and scatter of the training-time tests.
+
+| Method | Rig min | Reached (5 mm) | Final dist. | Inside after | Jerk |
+|---|---|---|---|---|---|
+| ODIL | 30 | 23/30 | 4.8 mm | 58 % | 0.0050 |
+|  | 60 | 25/30 | 4.9 mm | 42 % | 0.0058 |
+|  | 90 | 26/30 | 4.3 mm | 47 % | 0.0054 |
+| SAC | 30 | 5/30 | 19.4 mm | 14 % | 0.0168 |
+|  | 60 | 17/30 | 10.6 mm | 11 % | 0.0169 |
+|  | 120 | 21/30 | 8.9 mm | 21 % | 0.0178 |
+|  | 150 | 24/30 | 7.2 mm | 24 % | 0.0178 |
+|  | 210 | 25/30 | 8.4 mm | 26 % | 0.0179 |
+|  | 240 | 27/30 | 9.9 mm | 19 % | 0.0179 |
+|  | 300 | 25/30 | 7.6 mm | 35 % | 0.0181 |
+|  | 330 | 29/30 | 7.1 mm | 27 % | 0.0181 |
+|  | 390 | 29/30 | 7.4 mm | 21 % | 0.0183 |
+|  | 420 | 29/30 | 7.5 mm | 23 % | 0.0181 |
+|  | 480 | 28/30 | 9.2 mm | 22 % | 0.0179 |
+|  | 510 | 28/30 | 7.0 mm | 26 % | 0.0181 |
+| PPO | 60 | 15/30 | 7.1 mm | 42 % | 0.0168 |
+|  | 120 | 9/30 | 9.0 mm | 58 % | 0.0173 |
+|  | 180 | 10/30 | 10.9 mm | 32 % | 0.0185 |
+|  | 240 | 13/30 | 14.2 mm | 23 % | 0.0189 |
+|  | 300 | 13/30 | 10.6 mm | 25 % | 0.0189 |
+|  | 360 | 13/30 | 10.7 mm | 26 % | 0.0187 |
+|  | 420 | 10/30 | 11.2 mm | 41 % | 0.0191 |
+|  | 480 | 5/30 | 11.8 mm | 28 % | 0.0192 |
+|  | 540 | 8/30 | 9.3 mm | 43 % | 0.0190 |
+|  | 600 | 24/30 | 6.4 mm | 40 % | 0.0186 |
+
+- **ODIL ends closest to the centre and holds longest** (4.3-4.9 mm, 42-58 % inside) after 30-90 rig
+  min; told a small target, its stiction push acts down to 5 mm. At 12 mm this did not show (ODIL
+  stopped 8-9 mm off, because the push stops inside R).
+- **SAC hits the most small targets** (28-29/30 from 330 min) but after 2.5-4 h of rig time, ends
+  7-10 mm off and stays inside only 19-35 % (it overshoots).
+- **SAC did not degrade** in this back-to-back test (28-29/30 from 330 to 510 min): the "decline" of
+  the training-time tests in session 1 was most likely scatter between single tests.
+- **PPO** reaches 5-15/30 for most of its 10 h, 24/30 at 600 min: still improving, slowly. The
+  simulation-trained PPO v3 (2.5 M steps ~ 24 rig hours) reaches 29/30 and 4.0 mm, the likely
+  asymptote; measuring the crossover is step 4 of 13.1.
+- Smoothness: ODIL ~0.005 vs ~0.018 for both RL methods (about 3.5x).
+- (Drift check only: ODIL v11 sim-trained 9/30 -- the ball sat in the taped-hole dip for 21 trips; PPO v3 29/30, 4.0 mm.)
 
 ### 12.2 A surface defect: the taped-over hole
 
