@@ -526,6 +526,28 @@ stays a median of **4.5 mm** from the path. It is committed as
 star) after PPO. Its rig minutes spent learning the task are **zero**. For comparison, the
 sim-trained ODIL tracker of part 1 achieved a median of 3.6 mm and a worst case of 19 mm on the rig.
 
+
+## 13a. Protocol changes during the experiment (log for the paper)
+
+Every change to the rig software after session 1 started, why, and which runs it affects. **Runs are
+only compared directly when they used the same code**: session 1 (ODIL, SAC) predates the changes
+below; PPO and every later session use all of them. Session 2 (ODIL and SAC again, order swapped)
+therefore runs on the final code, so that ODIL, SAC and PPO are compared under identical conditions;
+session 1 is reported as the first run.
+
+| Date / time | Change (commit) | Reason | Affects |
+|---|---|---|---|
+| 10-03 16:30 | **Marker guard**: ball within 4.5 cm of a plate marker -> that frame's plate pose is not used (`db8ec17`) | SAC at ~530 rig min rolled the ball onto a marker; the bluish ball was taken for the marker, the tilt reading was 2-10 deg wrong and the servo drove the motors ~1000 ticks; session 1 stopped by hand at 510 rig min of SAC | all runs after session 1 |
+| 10-03 16:30 | **Corner shield**: within 6 cm of a marker every controller's action is replaced by a tilt towards the middle (`db8ec17`); ramps 1.4 -> 3.2 deg (`7743a5b`) | same; PPO left a ball resting in a corner for 263 s at a constant 1.4 deg | all runs after session 1 (SAC session 1: ball in that zone 0.6 % of frames) |
+| 10-03 16:45 | **Frozen test targets** (`data/test_targets.json`, `7e022c2`) | a hole detected at a later start would have shifted the seeded target draw | none (identical to session 1's targets, checked on all 20 tests) |
+| 10-03 18:30 | **Ball jump filter follows a rolling ball** when re-acquiring (`8e73b50`) | the old rule never re-acquired a moving ball: untrained PPO saw the ball only 58-80 % of the time (SAC's random phase 98-100 %) | all runs after session 1; SAC/ODIL in session 1 were hardly affected (98-100 % found) |
+| 10-03 21:50 | **Camera re-level pauses** instead of a watchdog stop, user-approved (`58e5882`) | PPO's hard tilting wound the commanded motor ticks up (motors 340-470 ticks short of the command); the 1300-tick watchdog stopped PPO after 26 min although the camera showed the plate following | runs with hard tilting (PPO); logged as `relevel` events |
+| 10-03 | `--sac-buffer` default 1 M (session 1: 300 k) (`0bbb493`) | test whether SAC's decline came from FIFO replay forgetting | SAC session 2 |
+
+**Aborted data (kept, not used in results):** `data/ppo1_aborted_corner.csv` (40 min, ball stuck in a
+corner 47 % of the last 10 min) and `data/ppo1_aborted_watchdog.csv` (26 min, watchdog stop). PPO was
+restarted from scratch each time, so the reported PPO curve is one uninterrupted run.
+
 ## 14. Safety engineering for unattended multi-day runs
 
 - **Start where the motors are.** The controller never drives to a stored or estimated position.
