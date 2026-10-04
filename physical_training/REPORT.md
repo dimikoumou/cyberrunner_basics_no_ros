@@ -547,6 +547,10 @@ session 1 is reported as the first run.
 
 **Note on motor 3 (2026-10-03, 23:17-23:20):** two 1-minute stress checks of the tracking with instantaneous +-4 deg flips on both axes (no rate limit -- much harsher than any controller, which change at most 0.5 deg per frame) moved motor 3's camera-level position from about 5200 to about 9750 ticks; the camera loop compensates and the plate levels normally. PPO itself had run 85 min before that without a single re-level. No further stress checks.
 
+**Motor 3 play (measured 2026-10-04 00:55, live test):** moving each tilt motor out and back open loop (camera reading the plate): motor 1 returns to within 0.03 deg (no measurable play); motor 3 stays 0.4 deg (150-tick move) to 0.85 deg (300-tick move) off after returning -- about 40-85 ticks of play in its drive. The motors themselves reach their commands within a few ticks. The camera-closed tilt servo compensates; under PPO's hard tilting the motor-3 position for a level plate creeps (about 1500 ticks in 48 min), which the camera re-level pauses absorb. All methods run on this rig; reported as a property of the setup.
+
+**PPO resumed (2026-10-04 ~01:00):** PPO's run was stopped after its 60-min test (motor-3 creep, user away) and resumed from its 60-min checkpoint (policy + optimiser, `--resume`); the first hour is in `data/ppo1_part1.csv`, the rest in `data/ppo1.csv`; rig minutes continue from 60. One run, two recordings.
+
 **Aborted data (kept, not used in results):** `data/ppo1_aborted_corner.csv` (40 min, ball stuck in a
 corner 47 % of the last 10 min) and `data/ppo1_aborted_watchdog.csv` (26 min, watchdog stop) and `data/ppo1_aborted_fastball.csv` (85 min, ball lost at high speed in the 60-min test). PPO was
 restarted from scratch each time, so the reported PPO curve is one uninterrupted run. The first PPO start (about 25 min, with the jump-filter problem) was overwritten by the restart; only the

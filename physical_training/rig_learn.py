@@ -58,6 +58,7 @@ DATA = os.path.join(HERE, "data")                      # rig recordings + test r
 LEVEL = (-1.1, 2.55)                     # (alpha, beta) deg, as in rl_policy / sysid_rig
 GOAL_X, GOAL_Y, R_TEST = 0.09, 0.07, 0.012
 SAC_BUFFER = 1_000_000                     # replay memory (steps); --sac-buffer
+RESUME = None                              # (checkpoint .zip, rig minutes already driven); --resume
 WATCH_TICKS = 1300
 DT = 1.0 / 29.0
 
@@ -602,9 +603,16 @@ def rl(rig, algo, hours, test_min, rng, dry, run="sac1"):
         model = PPO("MlpPolicy", env, n_steps=256 if dry else 2048, batch_size=64, n_epochs=10,
                     learning_rate=3e-4, gamma=0.99, gae_lambda=0.95, clip_range=0.2,
                     policy_kwargs=dict(net_arch=[256, 256]), verbose=0, device="cpu", seed=seed)
+    resumed = False
+    if RESUME is not None and os.path.basename(RESUME[0]).startswith(algo):
+        # continue the same run from its last checkpoint (policy + optimiser state); rig minutes go on
+        model = (SAC if algo == "sac" else PPO).load(RESUME[0], env=env, device="cpu")
+        env.driven = 60.0 * RESUME[1]
+        resumed = True
+        log({"event": "resume", "run": run, "checkpoint": RESUME[0], "rig_minutes": RESUME[1]})
     out_dir = os.path.join(SIM, "runs", f"{run}_rig" + ("_dry" if dry else ""))
     os.makedirs(out_dir, exist_ok=True)
-    next_test = [test_min]
+    next_test = [env.driven / 60.0 + test_min]
 
     class Every(BaseCallback):
         def _on_step(self):
@@ -620,7 +628,7 @@ def rl(rig, algo, hours, test_min, rng, dry, run="sac1"):
         def _on_rollout_end(self):
             rig.env._write_action(np.zeros(2, dtype=np.float32))      # level while the network updates
 
-    model.learn(total_timesteps=10 ** 8, callback=Every())
+    model.learn(total_timesteps=10 ** 8, callback=Every(), reset_num_timesteps=not resumed)
     model.save(os.path.join(out_dir, f"{algo}_final"))
     return model
 
@@ -758,10 +766,13 @@ def main():
     # session 1 used 300k (= ~172 min of driving, from rl_sim/train_sac.py) and declined after ~240 min;
     # 1M is the stable-baselines3 default (~575 min) -> tests whether FIFO forgetting caused it
     ap.add_argument("--sac-buffer", type=int, default=1_000_000)
+    ap.add_argument("--resume", nargs=2, metavar=("CHECKPOINT", "RIG_MIN"), help="continue an RL run")
     ap.add_argument("--dry", action="store_true")
     a = ap.parse_args()
     global SAC_BUFFER
     SAC_BUFFER = a.sac_buffer
+    global RESUME
+    RESUME = (a.resume[0], float(a.resume[1])) if a.resume else None
     if a.dry:
         a.odil_rounds, a.odil_min, a.sac_hours, a.sac_test_min = 1, 2, 4 / 60, 2
         a.ppo_hours, a.ppo_test_min = 4 / 60, 2
