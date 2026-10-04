@@ -763,6 +763,95 @@ def demo_track(rig, dry, shapes_=("circle", "square", "star"), speed=0.03):
                  "max_mm": round(float(np.max(offs)), 2)})
 
 
+# ---- shape test: trained controllers follow 5 shapes (real camera footage) -----------------------
+SHAPES = ("star", "heart", "circle", "square", "figure8")       # figure8 = the infinity symbol
+
+
+def shape_test(rig, dry, reps=3, speed=0.03, radius=0.008):
+    """every method's best rig-trained controller (best 12-mm test: most reached, then inside) follows the
+    same moving reference along 5 shapes, like pd_balance's draw mode. Goal-reaching controllers (ODIL, SAC,
+    PPO) get the moving reference point as their goal; the ODIL path tracker trained only from the ODIL rig
+    data (reuse, 0 extra rig minutes) gets the reference directly. Interleaved: rep -> shape -> controller."""
+    sys.path.insert(0, SIM)
+    import shapes
+    from line_path import PathTracker
+    from odil_track import TrackPolicy
+    from goal_circle import plate_to_pixel
+    from stable_baselines3 import SAC, PPO
+    R = os.path.join(SIM, "runs")
+    ctls = [("odil_rig60", "ODIL (goal-reaching) - trained only on the rig, 60 rig min", (235, 99, 37),
+             ODILCtl(os.path.join(R, "odil1_rig_r1", "odil_policy.npz"))),
+            ("sac_rig330", "SAC (RL) - trained only on the rig, 330 rig min", (38, 38, 220),
+             SACCtl(SAC.load(os.path.join(R, "sac1_rig", "sac_330min.zip"), device="cpu"))),
+            ("ppo_rig600", "PPO (RL) - trained only on the rig, 600 rig min", (38, 38, 220),
+             SACCtl(PPO.load(os.path.join(R, "ppo1_rig", "ppo_600min.zip"), device="cpu"))),
+            ("odil_tracker_reuse", "ODIL path tracker - from the ODIL rig data only (0 extra rig min)", (180, 60, 20),
+             TrackPolicy(os.path.join(R, "reuse_odil1_track", "odil_track_policy.npz")))]
+    approach = ODILCtl(os.path.join(R, "odil1_rig_r1", "odil_policy.npz"))   # not used for the tracker's approach
+    for rep in range(1 if dry else reps):
+        for name in (SHAPES[:1] if dry else SHAPES):
+            path = shapes.resample(shapes.shape(name, (-0.05, 0.02), 0.035))
+            px = []
+            for p_ in path:
+                q = plate_to_pixel(rig.env, np.asarray(p_, float))
+                if q is not None:
+                    px.append((float(q[1]), float(q[0])))
+            for tag, title, col, ctl in ctls:
+                film = rep == 0
+                if film:
+                    rig.start_video(f"shape_{name}_{tag}.mp4", title,
+                                    f"real rig camera, real time | {name} | green = path, orange = moving reference 3 cm/s", col)
+                rig.vid_ov = {"path_px": px}
+                is_tracker = isinstance(ctl, TrackPolicy)
+                ctl.reset()
+                reacher = approach if is_tracker else ctl
+                reacher.reset()
+                pos, vel, al, be, found, _ = rig.step(np.zeros(2), "shape")
+                t0 = time.time()
+                while time.time() - t0 < 12 and found and np.hypot(*(path[0] - pos)) > 0.008:   # go to the start
+                    pos, vel, al, be, found, _ = rig.step(reacher(path[0], radius, pos, vel, al, be), "shape")
+                ctl.reset()
+                follower = PathTracker(path, False, pos, keep_direction=True, v=speed)
+                boost, offs, jerks, t_prev, t1, ok = 0.0, [], [], time.time(), time.time(), False
+                while found and time.time() - t1 < 60:
+                    now = time.time()
+                    dt = max(now - t_prev, 1e-3)
+                    t_prev = now
+                    ref = follower.update(pos, dt)
+                    if ref.get("finished"):
+                        ok = True
+                        break
+                    if is_tracker:
+                        if np.hypot(*vel) < 0.01 and ref["lag"] > 0.005:
+                            boost = min(0.6, boost + 1.0 * dt)
+                        else:
+                            boost = max(0.0, boost - 2.0 * dt)
+                        a = np.clip(np.asarray(ctl(ref, pos, vel, dt), float) + boost * ref["t_hat"], -0.8, 0.8)
+                    else:
+                        a = ctl(np.asarray(ref["p"], float), radius, pos, vel, al, be)
+                    q = plate_to_pixel(rig.env, np.asarray(ref["p"], float))
+                    if q is not None:
+                        rig.vid_ov["ref_px"] = (float(q[1]), float(q[0]))
+                    pos, vel, al, be, found, j = rig.step(a, "shape")
+                    jerks.append(j)
+                    offs.append(1000 * float(np.min(np.hypot(*(path - pos).T))))
+                prog = float(min(follower.s, follower.L) / follower.L)
+                if film:
+                    t2 = time.time()
+                    while time.time() - t2 < 1.5:
+                        pos, vel, al, be, found, _ = rig.step(np.zeros(2), "shape")
+                    rig.stop_video()
+                rig.vid_ov = {}
+                log({"event": "shape test", "rep": rep + 1, "shape": name, "controller": tag, "finished": ok,
+                     "progress": round(prog, 3), "seconds": round(time.time() - t1, 1), "found": bool(found),
+                     "median_mm": round(float(np.median(offs)), 2) if offs else None,
+                     "p90_mm": round(float(np.percentile(offs, 90)), 2) if offs else None,
+                     "max_mm": round(float(np.max(offs)), 2) if offs else None,
+                     "jerk": round(float(np.mean(jerks)), 5) if jerks else None})
+                if not found:
+                    rig.reload()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--plan", default="ref,odil,sac")
@@ -803,6 +892,9 @@ def main():
             elif phase == "odil":
                 rig.stop_csv()
                 odil_rounds(rig, a.odil_rounds, a.odil_min, rng, a.dry, run)
+            elif phase == "shapes":
+                rig.start_csv(run)
+                shape_test(rig, a.dry)
             elif phase == "demo_track":
                 demo_track(rig, a.dry)
             elif phase == "demo":
