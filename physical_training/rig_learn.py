@@ -277,6 +277,9 @@ class Rig:
         self.stop_csv()
         os.makedirs(DATA, exist_ok=True)
         fn = os.path.join(DATA, f"{name}.csv")
+        if os.path.exists(fn):
+            # never overwrite a recording (2026-10-04: session 2's "sac1" truncated session 1's sac1.csv)
+            fn = os.path.join(DATA, f"{name}_{time.strftime('%Y%m%d_%H%M%S')}.csv")
         self.fcsv = open(fn, "w", newline="")
         self.csv = csv.writer(self.fcsv)
         self.csv.writerow(["t", "episode", "step", "xb", "yb", "vx", "vy", "alpha", "beta", "a0", "a1",
@@ -383,12 +386,12 @@ class SimPPOCtl:
         return a
 
 
-def references(rig, dry):
+def references(rig, dry, run="ref"):
     """the part-1 controllers (trained in simulation) on the same targets: anchors every session and
     links 'trained in simulation' to 'trained only on the rig'"""
     n = 6 if dry else 30
-    test(rig, ODILCtl(os.path.join(SIM, "runs", "odil_v11", "odil_policy.npz")), "ref_odil_v11_sim", 0, n=n, run="ref")
-    test(rig, SimPPOCtl(os.path.join(SIM, "runs", "plate_goal_v3", "policy_final.npz")), "ref_ppo_v3_sim", 0, n=n, run="ref")
+    test(rig, ODILCtl(os.path.join(SIM, "runs", "odil_v11", "odil_policy.npz")), "ref_odil_v11_sim", 0, n=n, run=run)
+    test(rig, SimPPOCtl(os.path.join(SIM, "runs", "plate_goal_v3", "policy_final.npz")), "ref_ppo_v3_sim", 0, n=n, run=run)
 
 
 def random_target(rng, rig):
@@ -491,7 +494,10 @@ def test(rig, ctl, name, rig_minutes, n=30, seed=2027, run=None, r=R_TEST):
            "trips": R}
     log({k: v for k, v in rec.items() if k != "trips"})
     os.makedirs(DATA, exist_ok=True)
-    with open(os.path.join(DATA, f"test_{run}_{name}_{int(rig_minutes)}min{tag}.json"), "w") as f:
+    fj = os.path.join(DATA, f"test_{run}_{name}_{int(rig_minutes)}min{tag}.json")
+    if os.path.exists(fj):                         # never overwrite a result (see start_csv)
+        fj = fj[:-5] + f"_{time.strftime('%Y%m%d_%H%M%S')}.json"
+    with open(fj, "w") as f:
         json.dump(rec, f)
     return rec
 
@@ -616,6 +622,8 @@ def rl(rig, algo, hours, test_min, rng, dry, run="sac1"):
         resumed = True
         log({"event": "resume", "run": run, "checkpoint": RESUME[0], "rig_minutes": RESUME[1]})
     out_dir = os.path.join(SIM, "runs", f"{run}_rig" + ("_dry" if dry else ""))
+    if not resumed and os.path.isdir(out_dir) and any(n.endswith(".zip") for n in os.listdir(out_dir)):
+        raise SystemExit(f"{out_dir} already holds checkpoints -- use another --tag (or --resume); not overwriting")
     os.makedirs(out_dir, exist_ok=True)
     next_test = [env.driven / 60.0 + test_min]
 
@@ -865,6 +873,7 @@ def main():
     # session 1 used 300k (= ~172 min of driving, from rl_sim/train_sac.py) and declined after ~240 min;
     # 1M is the stable-baselines3 default (~575 min) -> tests whether FIFO forgetting caused it
     ap.add_argument("--sac-buffer", type=int, default=1_000_000)
+    ap.add_argument("--tag", default="", help="session label prefixed to every run name, e.g. s2 -> s2_sac1")
     ap.add_argument("--resume", nargs=2, metavar=("CHECKPOINT", "RIG_MIN"), help="continue an RL run")
     ap.add_argument("--dry", action="store_true")
     a = ap.parse_args()
@@ -882,13 +891,13 @@ def main():
     try:
         for phase in a.plan.split(","):
             count[phase] = count.get(phase, 0) + 1
-            run = f"{phase}{count[phase]}" + ("_dry" if a.dry else "")
+            run = (f"{a.tag}_" if a.tag else "") + f"{phase}{count[phase]}" + ("_dry" if a.dry else "")
             rng = np.random.default_rng(zlib.crc32(run.encode()))       # each run its own, reproducible seed
             log({"event": "phase", "run": run})
             if phase in ("ref", "sac", "ppo"):
                 rig.start_csv(run)                     # everything recorded (ODIL starts its own per round)
             if phase == "ref":
-                references(rig, a.dry)
+                references(rig, a.dry, run)
             elif phase == "odil":
                 rig.stop_csv()
                 odil_rounds(rig, a.odil_rounds, a.odil_min, rng, a.dry, run)
