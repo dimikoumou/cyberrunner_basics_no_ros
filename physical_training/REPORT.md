@@ -546,7 +546,8 @@ session 1 is reported as the first run.
 
 **Aborted data (kept, not used in results):** `data/ppo1_aborted_corner.csv` (40 min, ball stuck in a
 corner 47 % of the last 10 min) and `data/ppo1_aborted_watchdog.csv` (26 min, watchdog stop). PPO was
-restarted from scratch each time, so the reported PPO curve is one uninterrupted run.
+restarted from scratch each time, so the reported PPO curve is one uninterrupted run. The first PPO start (about 25 min, with the jump-filter problem) was overwritten by the restart; only the
+figures quoted above (from its log) remain.
 
 ## 14. Safety engineering for unattended multi-day runs
 
