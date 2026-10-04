@@ -467,20 +467,46 @@ $$
 | | 360 min | 30/30 | 29/30 | 1.4 s | 81 % | 7.9 mm | 20 % | 50 % | 0.0182 |
 | | 390 min | 30/30 | 30/30 | 1.3 s | 76 % | 8.6 mm | 17 % | 43 % | 0.0182 |
 
-*(SAC continues to 600 rig minutes. Balls lost off the plate during tests: SAC 1, 2 and 1 at 30, 60 and 90 min, none afterwards; ODIL none. No safety stop occurred in this session.)*
+| | 420 min | 30/30 | 30/30 | 1.4 s | 74 % | 9.3 mm | | | 0.0181 |
+| | 450 min | 30/30 | | 1.4 s | 66 % | 10.2 mm | | | 0.0183 |
+| | 480 min | 30/30 | | 1.4 s | 61 % | 10.1 mm | | | 0.0181 |
+| | 510 min | 30/30 | | 1.3 s | 72 % | 9.5 mm | 13 % | | 0.0182 |
+
+*(Session 1 ended at ~530 rig min of SAC: the ball rolled onto a plate marker and corrupted the tilt reading; stopped by hand, see 13a. Balls lost off the plate during tests: SAC 1, 2 and 1 at 30, 60 and 90 min, none afterwards; ODIL none.)*
 
 **Reading:**
-- **Rig time to a good controller:** ODIL 60 min, SAC about 120 min (28/30 in both cases). That's
-  a factor of about 2, smaller than the factor of more than 10 seen against PPO in simulation.
-  SAC is far more data-efficient than PPO.
+- **Rig time to a good controller:** ODIL 60 min, SAC about 120 min (28/30 in both cases), a factor
+  of about 2.
 - **Smoothness:** ODIL's jerk is about 4× lower throughout. That's ODIL's clearest advantage.
 - **Precision and speed:** SAC reaches targets about 2× faster (1.2–1.4 s vs 2.2–2.9 s) and ends
   closer to the centre.
-- **SAC after its peak:** it has stayed on a plateau since about 150 min. Holding has slipped
-  slightly at 240–390 min (76–86 % inside, 7–9 mm). Whether that is a real decline is open until
-  the full 600 minutes.
+- **SAC after its peak (120–210 min, 85–92 % inside):** holding fell to 61–76 % at 390–510 min while it
+  still reached every target. The two unchanged simulation-trained references, re-tested at the end
+  (16:45), scored as well as or better than the night before (ODIL v11 27/30, 93 %; PPO v3 30/30,
+  99.7 %), so the plate and camera did not drift. **Caveat:** these are single tests per checkpoint,
+  and PPO's curve (12.1b) shows that one RL test can swing by 20-30 points of "inside". The back-to-back
+  retest of all saved checkpoints (13) is needed before calling it a decline.
 - **Both rig-only ODIL rounds after the first match or beat the sim-trained ODIL** (26/30, 9.8 mm).
   Learning only from the rig did not cost quality.
+
+### 12.1b PPO trained only on the rig (2026-10-04, from 01:15)
+
+One run from zero (earlier attempts with software problems are archived, see 13a); same test.
+
+| PPO | 60 | 120 | 180 | 240 | 300 | 360 | 420 min |
+|---|---|---|---|---|---|---|---|
+| Reached (of 30) | 23 | 25 | 22 | 19 | 21 | 24 | 21 |
+| Inside after | 89 % | 96 % | 80 % | 69 % | 70 % | 68 % | 98 % |
+| Final distance | 9.9 mm | 7.6 mm | 10.6 mm | 12.7 mm | 12.1 mm | 11.6 mm | 9.5 mm |
+| Jerk | 0.0166 | 0.0174 | 0.0185 | 0.0189 | 0.0187 | 0.0188 | 0.0187 |
+
+- **PPO learned far faster on the rig than simulation suggested:** after 60 rig min it was level
+  with SAC (23/30), after 120 min 25/30 with 96 % held. (In simulation PPO needed about 10x more
+  steps than SAC.)
+- **It fluctuates strongly from test to test** (68-98 % held) rather than improving steadily; the
+  plate, camera and motors were stable throughout (level within 0.25 deg, ball seen 100 %).
+- **Smoothness** is the same as SAC's (jerk ~0.018), about 4x ODIL's.
+- No camera re-level was needed during this run (the motor-3 creep came with the earlier ping-pong).
 
 ### 12.2 A surface defect: the taped-over hole
 
