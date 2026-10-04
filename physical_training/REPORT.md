@@ -553,6 +553,18 @@ star) after PPO. Its rig minutes spent learning the task are **zero**. For compa
 sim-trained ODIL tracker of part 1 achieved a median of 3.6 mm and a worst case of 19 mm on the rig.
 
 
+### 13.1 Order agreed on 2026-10-04 (supersedes the table above)
+
+| # | Step | Status |
+|---|---|---|
+| 1 | 5 mm retest of every saved controller (taped surface) | running |
+| 2 | **Shape test**: best rig-trained ODIL (60 min), SAC (330 min), PPO (600 min) -- chosen by rule: best 12-mm test -- follow a moving 3 cm/s reference along star, heart, circle, square, figure-8; plus the ODIL path tracker trained only from the ODIL rig data (reuse, 0 extra rig minutes); 3 reps, interleaved, rep 1 filmed | queued (`--plan shapes`) |
+| 3 | **Session 2**: references (drift check), SAC 10 h (1 M buffer), ODIL 3 rounds -- on the same software as PPO; then a short 5 mm test of each method's best checkpoint | queued |
+| 4 | **PPO extended to ~24 rig hours** (`--resume ppo_600min.zip 600`): measure where PPO overtakes ODIL instead of estimating it from the simulation-trained PPO v3 (2.5 M steps ~ 24 h) | at the very end |
+
+Framing for the paper: quality against **rig time** (curves), not a single winner; the simulation-trained
+controllers are only the drift check (and an estimate of PPO's asymptote), not competitors.
+
 ## 13a. Protocol changes during the experiment (log for the paper)
 
 Every change to the rig software after session 1 started, why, and which runs it affects. **Runs are
