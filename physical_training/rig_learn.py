@@ -223,7 +223,11 @@ class Rig:
         if p is not None and np.hypot(abs(p[0]) - 0.14175, abs(p[1]) - 0.11925) < 0.06:
             # ramp (2026-10-03, PPO): a ball resting in the corner against two walls stayed 263 s at a
             # constant 1.4 deg away-tilt (stiction ~1.6 deg) -> 1.4 deg rising 1 deg/s to 3.2 deg
-            self.shield_t = getattr(self, "shield_t", 0.0) + DT
+            # 2026-10-04: ramp ONLY while the ball is stuck (< 2 cm/s): ramping on a rolling ball shot it
+            # into the opposite corner and back (shield in control 32 % of PPO's frames)
+            lv = getattr(self, "last_vel", None)
+            stuck = lv is None or float(np.hypot(*lv)) < 0.02
+            self.shield_t = getattr(self, "shield_t", 0.0) + DT if stuck else 0.0
             a = -np.sign(p) * min(0.8, 0.35 + 0.25 * self.shield_t)
             self.shield_n = getattr(self, "shield_n", 0) + 1
         else:
@@ -235,6 +239,7 @@ class Rig:
         pos_ = np.array(obs[:2], float)
         if found:
             self.miss, self.last_pos = 0, pos_
+            self.last_vel = np.array(obs[2:4], float)
         else:
             self.miss = getattr(self, "miss", 0) + 1
             if self.miss < 10 and getattr(self, "last_pos", None) is not None:
