@@ -79,6 +79,8 @@ class Rig:
                                     max_episode_steps=10 ** 9, allow_unstick=False)
         self.env.recover_tilts = False
         self.start_ticks = dict(self.env._cmd_ticks)
+        self.first_ticks = dict(self.start_ticks)      # never re-based (absolute bound for re-levels)
+        self.n_relevel = 0
         self.holes = detect_holes_stable(self.env)
         # live view for the phone relay (rl_hw/remote_view.py reads :8000): camera image + the target
         from ui_server import UIServer
@@ -92,7 +94,52 @@ class Rig:
         signal.signal(signal.SIGTERM, lambda *_: self.shutdown("SIGTERM"))
 
     # ---- safety -------------------------------------------------------------------------
+    def relevel(self, why):
+        """user-approved 2026-10-03: the commanded ticks wound up (PPO: motors 340-470 ticks short of
+        their command, the watchdog tripped after 26 min although the camera showed the plate following):
+        re-read where the motors ARE (as at startup), level on the camera, and only a camera-confirmed
+        level becomes the new reference. Fails -> stop, torque on."""
+        from state_est_control import read_motor_positions, set_position
+        from plate_env import LEVEL_OFFSET_DEG
+        env = self.env
+        self.n_relevel += 1
+        log({"event": "relevel", "why": why, "n": self.n_relevel, "cmd_ticks": dict(env._cmd_ticks)})
+        # a ball on a plate marker blocks the camera pose: roll it off first (open loop, up to 5 deg)
+        t0 = time.time()
+        while time.time() - t0 < 12:
+            xb, yb, _, _, found = env._read_state()
+            if not (found and getattr(env, "ball_at_marker", False)):
+                break
+            mag = min(1.0, 0.35 + 0.33 * ((time.time() - t0) % 3.0))
+            env._write_action((-np.sign([xb, yb]) * mag).astype(np.float32))
+            time.sleep(env.dt)
+        present = read_motor_positions(env.port_handler, env.packet_handler, [1, 3])
+        if any(present.get(k) is None for k in (1, 3)):
+            self.shutdown("relevel: could not read the motor positions")
+        for k in (1, 3):
+            set_position(env.port_handler, env.packet_handler, k, int(present[k]))
+            env._cmd_ticks[k] = int(present[k])
+        env._session_level = {k: int(present[k]) for k in (1, 3)}
+        env._stall, env._tilt_target = {}, LEVEL_OFFSET_DEG
+        env._target_hist = [LEVEL_OFFSET_DEG] * 12
+        env._last_commanded_action = np.zeros(2, dtype=np.float32)
+        time.sleep(0.5)
+        env._servo_level(max_s=20.0)
+        a, b = env._meas_tilt if env._meas_tilt is not None else (np.nan, np.nan)
+        ok = env._pose_ok and abs(a - LEVEL_OFFSET_DEG[0]) < 0.5 and abs(b - LEVEL_OFFSET_DEG[1]) < 0.5
+        if not ok:
+            self.shutdown(f"relevel failed (alpha {a:+.2f} beta {b:+.2f})")
+        if any(abs(env._cmd_ticks[k] - self.first_ticks[k]) > 3000 for k in (1, 3)):
+            self.shutdown(f"relevel: level now {dict(env._cmd_ticks)}, > 3000 ticks from the session start {self.first_ticks}")
+        self.start_ticks = dict(env._cmd_ticks)
+        log({"event": "relevel ok", "n": self.n_relevel, "present": {k: int(present[k]) for k in (1, 3)},
+             "level_ticks": dict(env._cmd_ticks), "seconds": round(time.time() - t0, 1)})
+
     def check(self):
+        for k, t0 in self.start_ticks.items():
+            if abs(self.env._cmd_ticks.get(k, t0) - t0) > WATCH_TICKS - 300:
+                self.relevel(f"motor {k} command {self.env._cmd_ticks.get(k)} within 300 of the +-{WATCH_TICKS} watchdog")
+                break
         for k, t0 in self.start_ticks.items():
             if abs(self.env._cmd_ticks.get(k, t0) - t0) > WATCH_TICKS:
                 self.shutdown(f"motor {k} command {self.env._cmd_ticks.get(k)} left +-{WATCH_TICKS} of {t0}", release=True)
