@@ -627,6 +627,11 @@ def rl(rig, algo, hours, test_min, rng, dry, run="sac1"):
 
         def _on_rollout_end(self):
             rig.env._write_action(np.zeros(2, dtype=np.float32))      # level while the network updates
+            # latest state after every batch (~70 s for PPO): a stop loses at most one batch; resumed by
+            # tools/ppo_supervisor.py with --resume <latest> <rig min>
+            model.save(os.path.join(out_dir, f"{algo}_latest"))
+            with open(os.path.join(out_dir, f"{algo}_latest.json"), "w") as f_:
+                json.dump({"rig_minutes": env.driven / 60.0, "t": time.time(), "num_timesteps": int(model.num_timesteps)}, f_)
 
     model.learn(total_timesteps=10 ** 8, callback=Every(), reset_num_timesteps=not resumed)
     model.save(os.path.join(out_dir, f"{algo}_final"))
