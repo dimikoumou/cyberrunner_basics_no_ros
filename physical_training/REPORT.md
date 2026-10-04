@@ -170,9 +170,9 @@ The theoretical $k \approx 0.12$ is a little higher, as expected with real rolli
 
 ### 6.1 The idea
 
-ODIL comes from Koumoutsakos' group (Karnakov, Litvinov, Koumoutsakos). The control version we
-follow is "Optimal Navigation in Microfluidics via the Optimization of a Discrete Loss"
-(arXiv 2506.15902). Instead of simulating forward and estimating gradients from sampled outcomes
+ODIL was introduced by Karnakov, Litvinov and Koumoutsakos (PNAS Nexus 2024). The control version we
+follow is "Optimal Navigation in Microfluidics via the Optimization of a Discrete Loss" (Karnakov,
+Amoudruz, Koumoutsakos, arXiv 2506.15902, 2025). Instead of simulating forward and estimating gradients from sampled outcomes
 (as RL does), it writes **many trajectories** with all their time points as **unknowns**. It then
 minimises one loss over all of them **together with the weights $\phi$ of a closed-loop neural
 policy** $\pi_\phi$. The physics enters as a penalty on the discretised equations (midpoint rule).
@@ -716,9 +716,12 @@ figures quoted above (from its log) remain.
 
 ## 17. References
 
-- Karnakov, Litvinov, Koumoutsakos et al. — ODIL (Optimizing a Discrete Loss); and "Optimal
-  Navigation in Microfluidics via the Optimization of a Discrete Loss", arXiv 2506.15902.
-  *(Check the exact author lists on arXiv before citing.)*
+- Karnakov, P., Litvinov, S., Koumoutsakos, P. (2024). Solving inverse problems in physics by optimizing a
+  discrete loss: Fast and accurate learning without neural networks. *PNAS Nexus* 3(1), pgae005.
+  doi:10.1093/pnasnexus/pgae005 (arXiv:2205.04611). -- the ODIL method.
+- Karnakov, P., Amoudruz, L., Koumoutsakos, P. (2025). Optimal Navigation in Microfluidics via the
+  Optimization of a Discrete Loss. arXiv:2506.15902. -- ODIL for control (trajectories + policy), the
+  variant adapted here.
 - Haarnoja, Zhou, Abbeel, Levine (2018). Soft Actor-Critic: Off-Policy Maximum Entropy Deep
   Reinforcement Learning with a Stochastic Actor. ICML.
 - Schulman, Wolski, Dhariwal, Radford, Klimov (2017). Proximal Policy Optimization Algorithms.
