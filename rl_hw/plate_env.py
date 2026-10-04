@@ -1411,7 +1411,7 @@ class HardwarePlateEnv(gym.Env):
         # passes because the allowance grows with the previous speed.
         if ball_found and self._prev_t is not None and np.all(np.isfinite(self._prev_ball)):
             jump = float(np.hypot(xb - self._prev_ball[0], yb - self._prev_ball[1]))
-            allow = max(0.012, 3.0 * getattr(self, "_prev_speed", 0.0) * max(time.time() - self._prev_t, self.dt) + 0.006)
+            allow = max(0.012, 3.0 * getattr(self, "_prev_speed", 0.0) * min(max(time.time() - self._prev_t, self.dt), 0.3) + 0.006)
             if jump > allow:
                 # a glitch is one frame; a ball that really is somewhere else (moved while not
                 # tracked, put back by hand) is seen there frame after frame -- after 5 consistent
@@ -1419,16 +1419,23 @@ class HardwarePlateEnv(gym.Env):
                 # 2026-10-03: the candidate must FOLLOW a rolling ball (<= 20 mm per frame, ~0.6 m/s):
                 # "5 frames within 6 mm of the first sighting" never re-acquired a moving ball, and
                 # untrained PPO (fast tilts) saw the ball only 58-80 % of the time (SAC: 98-100 %)
+                # 2026-10-03 (2): up to 40 mm per frame (~1.2 m/s; PPO at full tilt exceeded 0.6 m/s and the
+                # ball was "lost" mid-plate in every test trip), and after re-acquiring use the MEASURED speed
+                # of the followed candidate -- speed 0 made the next frame of a fast ball a "jump" again
                 cand = getattr(self, "_jump_cand", None)
-                if cand is not None and np.hypot(xb - cand[0], yb - cand[1]) < 0.020:
+                now_ = time.time()
+                cand_prev = (cand, getattr(self, "_jump_t", now_))
+                if cand is not None and np.hypot(xb - cand[0], yb - cand[1]) < 0.040:
+                    self._jump_speed = float(np.hypot(xb - cand[0], yb - cand[1])) / max(now_ - self._jump_t, self.dt)
                     self._jump_cand, self._jump_n = (xb, yb), getattr(self, "_jump_n", 0) + 1
                 else:
-                    self._jump_cand, self._jump_n = (xb, yb), 1
+                    self._jump_cand, self._jump_n, self._jump_speed = (xb, yb), 1, 0.0
+                self._jump_t = now_
                 if self._jump_n >= 3:
                     print(f"[HardwarePlateEnv] ball re-acquired {jump * 1000:.0f} mm away (followed 3 frames)")
                     self._jump_cand, self._jump_n = None, 0
-                    self._prev_speed = 0.0
-                    self._prev_ball = np.array([xb, yb], dtype=np.float32)   # no fake jump velocity
+                    # velocity from the candidate's previous sighting (not 0, not the old position)
+                    self._reacq_ref = (np.array(cand_prev[0], dtype=np.float32), cand_prev[1])
                 else:
                     print(f"[HardwarePlateEnv] ignoring implausible ball jump of {jump * 1000:.0f} mm")
                     ball_found = False
@@ -1482,12 +1489,24 @@ class HardwarePlateEnv(gym.Env):
         # velocity -- and the PD's D term -- ~2.4x (measured 2026-09-26 in the
         # logs; it drove a ~1.45 Hz limit cycle around the goal).
         now = time.time()
-        dt_meas = min(max(now - self._prev_t, 1e-3), 0.25) if self._prev_t is not None else self.dt
-        self._prev_t = now
-        vx = (xb - self._prev_ball[0]) / dt_meas
-        vy = (yb - self._prev_ball[1]) / dt_meas
-        self._prev_speed = float(np.hypot(vx, vy))
-        self._prev_ball = np.array([xb, yb], dtype=np.float32)
+        if ball_found:
+            # 2026-10-03: a missed frame no longer resets position/time/speed (speed 0 made the next
+            # frame of a fast ball a "jump" -> chain reaction); after a re-acquire the velocity comes
+            # from the followed candidate
+            ref = getattr(self, "_reacq_ref", None)
+            self._reacq_ref = None
+            ref_ball, ref_t = ref if ref is not None else (self._prev_ball, self._prev_t)
+            dt_meas = min(max(now - ref_t, 1e-3), 0.25) if ref_t is not None else self.dt
+            vx = (xb - ref_ball[0]) / dt_meas
+            vy = (yb - ref_ball[1]) / dt_meas
+            sp_ = float(np.hypot(vx, vy))
+            if sp_ > 1.0:                       # the ball cannot exceed ~1 m/s here: a glitch, not motion
+                vx, vy = vx / sp_, vy / sp_
+            self._prev_t = now
+            self._prev_speed = float(np.hypot(vx, vy))
+            self._prev_ball = np.array([xb, yb], dtype=np.float32)
+        else:
+            vx = vy = 0.0
 
         dist = float(np.hypot(self.goal[0] - xb, self.goal[1] - yb))
         reward = -dist

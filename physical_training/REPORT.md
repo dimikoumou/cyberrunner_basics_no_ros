@@ -542,10 +542,13 @@ session 1 is reported as the first run.
 | 10-03 16:45 | **Frozen test targets** (`data/test_targets.json`, `7e022c2`) | a hole detected at a later start would have shifted the seeded target draw | none (identical to session 1's targets, checked on all 20 tests) |
 | 10-03 18:30 | **Ball jump filter follows a rolling ball** when re-acquiring (`8e73b50`) | the old rule never re-acquired a moving ball: untrained PPO saw the ball only 58-80 % of the time (SAC's random phase 98-100 %) | all runs after session 1; SAC/ODIL in session 1 were hardly affected (98-100 % found) |
 | 10-03 21:50 | **Camera re-level pauses** instead of a watchdog stop, user-approved (`58e5882`) | PPO's hard tilting wound the commanded motor ticks up (motors 340-470 ticks short of the command); the 1300-tick watchdog stopped PPO after 26 min although the camera showed the plate following | runs with hard tilting (PPO); logged as `relevel` events |
+| 10-03 23:30 | **Ball tracking at high speed**: a missed frame no longer resets position/time/speed; after re-acquiring, the velocity comes from the followed candidate (<= 40 mm/frame); speeds above 1 m/s are clamped as glitches; jump allowance window capped at 0.3 s | PPO's first test (60 rig min) lost the ball mid-plate in all 30 trips: at full tilt the ball exceeded 0.6 m/s and each miss reset the speed to 0, so the next frame was rejected again | all runs from PPO's 4th start on; a 1-min full-tilt check saw the ball 91.6 % of the time |
 | 10-03 | `--sac-buffer` default 1 M (session 1: 300 k) (`0bbb493`) | test whether SAC's decline came from FIFO replay forgetting | SAC session 2 |
 
+**Note on motor 3 (2026-10-03, 23:17-23:20):** two 1-minute stress checks of the tracking with instantaneous +-4 deg flips on both axes (no rate limit -- much harsher than any controller, which change at most 0.5 deg per frame) moved motor 3's camera-level position from about 5200 to about 9750 ticks; the camera loop compensates and the plate levels normally. PPO itself had run 85 min before that without a single re-level. No further stress checks.
+
 **Aborted data (kept, not used in results):** `data/ppo1_aborted_corner.csv` (40 min, ball stuck in a
-corner 47 % of the last 10 min) and `data/ppo1_aborted_watchdog.csv` (26 min, watchdog stop). PPO was
+corner 47 % of the last 10 min) and `data/ppo1_aborted_watchdog.csv` (26 min, watchdog stop) and `data/ppo1_aborted_fastball.csv` (85 min, ball lost at high speed in the 60-min test). PPO was
 restarted from scratch each time, so the reported PPO curve is one uninterrupted run. The first PPO start (about 25 min, with the jump-filter problem) was overwritten by the restart; only the
 figures quoted above (from its log) remain.
 
