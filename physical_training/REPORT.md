@@ -556,6 +556,28 @@ free of the hour-to-hour drift and scatter of the training-time tests.
 - Smoothness: ODIL ~0.005 vs ~0.018 for both RL methods (about 3.5x).
 - (Drift check only: ODIL v11 sim-trained 9/30 -- the ball sat in the taped-hole dip for 21 trips; PPO v3 29/30, 4.0 mm.)
 
+### 12.3 Shape test: new task, rig-trained controllers (2026-10-04)
+
+The best rig-trained controller of each method (by rule: best 12-mm test) follows a moving reference
+(3 cm/s, waits if the ball lags > 25 mm) along star, heart, circle, square and figure-8, 3 rounds,
+interleaved; goal-reaching controllers get the reference as their goal (R = 8 mm). The ODIL path
+tracker was trained **only from the 90 min of ODIL rig data** (fit -> ODIL tracking -> closed-loop
+refinement on an M1 Max; `reuse_tracker.py`), i.e. a new task with **0 extra rig minutes**.
+60 runs, round 1 filmed (`report/video/shapes_*_all4.mp4`).
+
+| Controller | Finished | Median distance to path | p90 | Max (mean / worst) | Time per shape | Jerk |
+|---|---|---|---|---|---|---|
+| **ODIL path tracker (reuse, 0 extra rig min)** | **15/15** | **3.2 +- 0.4 mm** | **6.9 mm** | 12.4 / 20.7 mm | **9.5 s** | 0.011 |
+| ODIL goal-reaching (60 rig min) | 14/15 | 4.4 +- 1.3 mm | 8.5 mm | 13.2 / 21.6 mm | 13.3 s | **0.005** |
+| SAC (330 rig min) | 15/15 | 4.2 +- 0.8 mm | 10.5 mm | 16.0 / 29.2 mm | 9.6 s | 0.018 |
+| PPO (600 rig min) | 13/15 | 4.0 +- 1.4 mm | 8.0 mm | 11.7 / 16.1 mm | 10.8 s | 0.019 |
+
+- **Reuse:** the physics fitted from rig data recorded for another task trains a path tracker that is
+  the most accurate and consistent of all, finishes every run, is the fastest, and needs no rig time.
+- SAC and PPO, trained for goal reaching, can follow a moving goal but less accurately and less
+  reliably; matching the tracker would need new rig training with a tracking reward.
+- The goal-reaching ODIL is the smoothest (about 4x) but slower on curves.
+
 ### 12.2 A surface defect: the taped-over hole
 
 In ODIL's first test (30 rig min) the ball sat for about 80 s at the plate centre, at (13, −12) mm,
