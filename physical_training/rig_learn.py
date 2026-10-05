@@ -62,6 +62,7 @@ GOAL_X, GOAL_Y, R_TEST = 0.09, 0.07, 0.012
 SAC_BUFFER = 1_000_000                     # replay memory (steps); --sac-buffer
 RESUME = None                              # (checkpoint .zip, rig minutes already driven); --resume
 WATCH_TICKS = 1300
+DIP_XY, DIP_R = (0.015, -0.011), 0.02   # the taped-over hole (ball rested at (13..16, -11..-12) mm)
 DT = 1.0 / 29.0
 
 
@@ -234,6 +235,27 @@ class Rig:
             self.shield_n = getattr(self, "shield_n", 0) + 1
         else:
             self.shield_t = 0.0
+        # dip twitch (user, 2026-10-04): the taped-over hole near the centre is a small dip; a ball resting in
+        # it while the target is elsewhere gets a short twitch towards the target (3.2 deg, 3 frames), at most
+        # once a second, the same for every controller; counted in self.twitch_n
+        g = getattr(self.env, "goal", None)
+        lv = getattr(self, "last_vel", None)
+        tw = getattr(self, "twitch_left", 0)
+        if tw > 0:
+            a = self.twitch_dir * 0.8
+            self.twitch_left = tw - 1
+        elif (p is not None and g is not None and lv is not None
+              and np.hypot(p[0] - DIP_XY[0], p[1] - DIP_XY[1]) < DIP_R
+              and np.hypot(*(np.asarray(g, float) - p)) > 0.015 and float(np.hypot(*lv)) < 0.01):
+            self.dip_still = getattr(self, "dip_still", 0.0) + DT
+            if self.dip_still > 1.0 and time.time() - getattr(self, "twitch_t", 0.0) > 1.0:
+                d_ = np.asarray(g, float) - p
+                self.twitch_dir = d_ / max(np.hypot(*d_), 1e-6)
+                self.twitch_left, self.twitch_t, self.dip_still = 2, time.time(), 0.0
+                self.twitch_n = getattr(self, "twitch_n", 0) + 1
+                a = self.twitch_dir * 0.8
+        else:
+            self.dip_still = 0.0
         obs, _, _, _, info = self.env.step(a.astype(np.float32))
         found = bool(info.get("ball_found", info.get("status") != "ball_lost"))
         # a frame or two without the ball (camera hiccup, edge) is not a lost ball: hold the last
@@ -487,7 +509,8 @@ def test(rig, ctl, name, rig_minutes, n=30, seed=2027, run=None, r=R_TEST):
     if not prev_csv:
         rig.stop_csv()
     ok = [r for r in R if r["reached"]]
-    rec = {"event": "test", "method": name, "run": run, "radius_mm": round(1000 * r, 1), "rig_minutes": round(rig_minutes, 1), "n": n,
+    rec = {"event": "test", "method": name, "run": run, "radius_mm": round(1000 * r, 1),
+           "twitches_total": int(getattr(rig, "twitch_n", 0)), "shield_frames_total": int(getattr(rig, "shield_n", 0)), "rig_minutes": round(rig_minutes, 1), "n": n,
            "reached": len(ok), "lost": sum(r["lost"] for r in R),
            "t_reach_med": float(np.median([r["t_reach"] for r in ok])) if ok else None,
            "inside_after_mean": float(np.mean([r["inside_after"] for r in ok])) if ok else 0.0,
