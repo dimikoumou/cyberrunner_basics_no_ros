@@ -70,6 +70,16 @@ def latest_checkpoint(run, algo):
     return best
 
 
+def level(tries=4):
+    """camera levelling in fresh processes, each from where the last one stopped (each is capped at a
+    900-tick move; 2026-10-05: a ball on a corner marker took three -- two to roll it off, one to level)"""
+    for _ in range(tries):
+        lv = subprocess.run([PY, "-u", os.path.join(HERE, "level_plate.py")], cwd=PT, capture_output=True, text=True)
+        if lv.returncode == 0:
+            break
+    return lv
+
+
 def running():
     return subprocess.run(["pgrep", "-f", "rig_learn.py"], capture_output=True).stdout.strip() != b""
 
@@ -108,9 +118,7 @@ def run_step(name, args, run, algo, first_attempt_running=False, resume=None):
             log({"event": "plan stopped", "step": name, "why": why, "released": released, "recoveries": n_rec})
             return False
         n_rec += 1
-        lv = subprocess.run([PY, "-u", os.path.join(HERE, "level_plate.py")], cwd=PT, capture_output=True, text=True)
-        if lv.returncode != 0:                           # a second try from where the first one stopped
-            lv = subprocess.run([PY, "-u", os.path.join(HERE, "level_plate.py")], cwd=PT, capture_output=True, text=True)
+        lv = level()
         res = [l for l in lv.stdout.splitlines() if l.startswith(("RESULT", "STOP", "STILL"))]
         if lv.returncode != 0:
             log({"event": "plan stopped", "step": name, "why": f"levelling failed {res}", "recoveries": n_rec})
@@ -133,14 +141,21 @@ def run_step(name, args, run, algo, first_attempt_running=False, resume=None):
 
 
 def main():
+    # --from STEP: restart the plan at that step (after a manual recovery); it resumes from the latest state
+    start = sys.argv[sys.argv.index("--from") + 1] if "--from" in sys.argv else STEPS[0][0]
+    steps = STEPS[[s[0] for s in STEPS].index(start):]
     already = running()
-    for i, (name, args, run, algo) in enumerate(STEPS):
+    for i, (name, args, run, algo) in enumerate(steps):
         if i > 0:
-            lv = subprocess.run([PY, "-u", os.path.join(HERE, "level_plate.py")], cwd=PT, capture_output=True, text=True)
+            lv = level()
             if lv.returncode != 0:
                 log({"event": "plan stopped", "step": name, "why": "levelling before the step failed"})
                 return
-        first = (os.path.join(RUNS, "ppo1_rig", "ppo_600min.zip"), 600) if name == "ppo_extension" else None
+        first = None
+        if name == "ppo_extension":                      # the latest PPO state once the extension has begun
+            first = latest_checkpoint(run, algo)
+            if first is None or first[1] < 600:
+                first = (os.path.join(RUNS, "ppo1_rig", "ppo_600min.zip"), 600)
         ok = run_step(name, args, run, algo, first_attempt_running=(i == 0 and already), resume=first)
         if not ok:
             return
