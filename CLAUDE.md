@@ -2,6 +2,9 @@
 
 Read these before working here:
 
+- **[`physical_training/STATUS.md`](physical_training/STATUS.md) -- what is running on the rig right now and how to
+  check or recover it. Read this first.**
+
 - **[`docs/ODIL_REPORT.md`](docs/ODIL_REPORT.md)** -- everything done with ODIL: balancing vs RL,
   path tracking, the real maze (solved 3 times), the learning loop, reliability tools, safety
   lessons, current state and next steps.
