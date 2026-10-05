@@ -144,7 +144,9 @@ ANGLE_GUARD_DEG = 7.0
 # then no longer drive a motor to its tick limit.
 MOTOR_CAP_DEG = 8.0
 MOTOR_CAP_TICKS_MAX = int(os.environ.get("PLATE_CAP_TICKS", "1200"))
-MARKER_GUARD_M = float(os.environ.get("PLATE_MARKER_GUARD_M", "0"))   # see _read_state   # never more than this from level, whatever the measured response says
+MARKER_GUARD_M = float(os.environ.get("PLATE_MARKER_GUARD_M", "0"))   # see _read_state
+PLAUSIBLE_OFF_DEG = float(os.environ.get("PLATE_PLAUSIBLE_OFF_DEG", "6.0"))   # see _servo_tilt
+PLAUSIBLE_FRAMES = int(os.environ.get("PLATE_PLAUSIBLE_FRAMES", "15"))   # never more than this from level, whatever the measured response says
 STALL_TICKS = 10 ** 9   # (tick-count stall guard disabled)
 STALL_GAIN_DEG = 0.3
 STALL_RETARGET_DEG = 2.0   # a new command (target moved this much) is a fresh attempt
@@ -753,9 +755,12 @@ class HardwarePlateEnv(gym.Env):
         # correction, motors hold) and make the marker tracking search again from scratch.
         if self._pose_ok and self._meas_tilt is not None and len(self._target_hist) > 6:
             off = max(abs(self._target_hist[-6][k] - meas[k]) for k in (0, 1))
-            self._implausible_n = getattr(self, "_implausible_n", 0) + 1 if off > 6.0 else 0
-            if self._implausible_n >= 15:
-                if self._implausible_n == 15:
+            # 2026-10-04: a hand in front of the camera (markers partly covered) drove the plate 2-7 deg
+            # off for minutes: normal tracking is within 0.2-0.3 deg, so > 4 deg for 10 frames (1/3 s)
+            # is never real (was 6 deg for 15 frames)
+            self._implausible_n = getattr(self, "_implausible_n", 0) + 1 if off > PLAUSIBLE_OFF_DEG else 0
+            if self._implausible_n >= PLAUSIBLE_FRAMES:
+                if self._implausible_n == PLAUSIBLE_FRAMES:
                     print(f"[HardwarePlateEnv] tilt reading {off:.1f} deg from the command for 0.5 s -- "
                           f"not trusted, servo holds, plate markers re-searched")
                     self.pipeline.measurements.detector.corners = None

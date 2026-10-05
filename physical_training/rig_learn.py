@@ -41,7 +41,9 @@ import numpy as np
 # no controller here asks for more than 4 deg (~800 ticks at ~200 ticks/deg); the default cap of
 # 1200 ticks (~6 deg) let an untrained PPO ramp motor 1 by 1439 ticks in the dry run (watchdog stop)
 os.environ.setdefault("PLATE_CAP_TICKS", "1000")
-os.environ.setdefault("PLATE_MARKER_GUARD_M", "0.045")   # ball within 4.5 cm of a plate marker: pose not used
+os.environ.setdefault("PLATE_MARKER_GUARD_M", "0.045")
+os.environ.setdefault("PLATE_PLAUSIBLE_OFF_DEG", "4.0")   # tilt reading this far off the command ...
+os.environ.setdefault("PLATE_PLAUSIBLE_FRAMES", "10")     # ... for 1/3 s = not trusted (hand in front of the camera)   # ball within 4.5 cm of a plate marker: pose not used
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, ".."))
 SIM = os.path.join(ROOT, "rl_sim")
@@ -618,6 +620,9 @@ def rl(rig, algo, hours, test_min, rng, dry, run="sac1"):
     if RESUME is not None and os.path.basename(RESUME[0]).startswith(algo):
         # continue the same run from its last checkpoint (policy + optimiser state); rig minutes go on
         model = (SAC if algo == "sac" else PPO).load(RESUME[0], env=env, device="cpu")
+        buf = os.path.join(os.path.dirname(RESUME[0]), "sac_buffer_latest.pkl")
+        if algo == "sac" and os.path.exists(buf):
+            model.load_replay_buffer(buf)
         env.driven = 60.0 * RESUME[1]
         resumed = True
         log({"event": "resume", "run": run, "checkpoint": RESUME[0], "rig_minutes": RESUME[1]})
@@ -633,6 +638,8 @@ def rl(rig, algo, hours, test_min, rng, dry, run="sac1"):
             if m >= next_test[0]:
                 rig.env._write_action(np.zeros(2, dtype=np.float32))
                 model.save(os.path.join(out_dir, f"{algo}_{int(m)}min"))
+                if algo == "sac":   # SAC's memory is not in the .zip: keep it so a resume keeps its experience
+                    model.save_replay_buffer(os.path.join(out_dir, "sac_buffer_latest.pkl"))
                 test(rig, SACCtl(model), algo, m, n=6 if dry else 30, run=run)
                 next_test[0] += test_min
                 env.reset()
