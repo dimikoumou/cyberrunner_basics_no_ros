@@ -1,12 +1,14 @@
 # Rig status / handoff (read this first in a new session)
 
-*Updated 2026-10-04 23:40. Full report: [REPORT.md](REPORT.md) (results, equations, change log 13a).*
+*Updated 2026-10-05 12:15. Full report: [REPORT.md](REPORT.md) (results, equations, change log 13a).*
 
 ## What is running (unattended)
 `tools/run_plan.py` (detached, log `data/run_plan.log`) runs in order:
-1. **Session 2c**: SAC (`s2c_sac1`, resumed once at 90 rig min) to 600 rig min, then ODIL 3 rounds
-   (`s2c_odil1`). ETA Mon ~12:00.
-2. **PPO extension**: `ppo1` resumed from `ppo_600min.zip` to 1440 rig min (24 h). ETA Tue ~05:00.
+1. **Session 2c**: SAC (`s2c_sac1`) done: 600 rig min, 30/30 at 600. ODIL 3 rounds (`s2c_odil1`) running,
+   28/30 after round 0. ETA Mon ~13:30.
+2. **5 mm retest of session 2**: SAC at 60/120/300/600 min + the 3 ODIL rounds (~1.5 h). ETA Mon ~15:00.
+3. **PPO extension**: `ppo1` resumed from `ppo_600min.zip` to 1440 rig min (~1.4 wall min per rig min).
+   ETA Tue ~11:00.
 
 Recoverable stops (re-level failed, 3000-tick limit) are handled by run_plan itself (fresh camera
 levelling + resume, event `auto-resume`). Anything else ends the plan with the plate held

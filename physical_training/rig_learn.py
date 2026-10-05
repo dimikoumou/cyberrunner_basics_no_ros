@@ -682,27 +682,33 @@ def rl(rig, algo, hours, test_min, rng, dry, run="sac1"):
 
 
 # ---- retest: every saved policy again at a SMALL target ---------------------------------------
-def retest(rig, r, dry, max_per_run=12):
+def retest(rig, r, dry, max_per_run=12, runs=None, mins=None):
     """the precision question (2026-10-03): ODIL's breakaway boost (stiction compensation) only acts
     while the ball is still and further out than R, so at R = 12 mm a ball stuck ~8 mm off is left
     there (ODIL v9 itself aims at the centre: ODIL_END_FREE = 0); SAC/PPO are pulled to the centre by
-    -d/0.1. All take the radius as an input -> tell every saved policy 'the target is r'."""
+    -d/0.1. All take the radius as an input -> tell every saved policy 'the target is r'.
+    `runs` (2026-10-05, session 2): only these runs (tagged names like s2c_sac1), no sim references;
+    `mins`: only these RL checkpoints (rig minutes). Without them: session 1 as before."""
     import glob
     import re
     from stable_baselines3 import SAC, PPO
     n = 6 if dry else 30
-    test(rig, ODILCtl(os.path.join(SIM, "runs", "odil_v11", "odil_policy.npz")), "ref_odil_v11_sim", 0, n=n, run="ref", r=r)
-    test(rig, SimPPOCtl(os.path.join(SIM, "runs", "plate_goal_v3", "policy_final.npz")), "ref_ppo_v3_sim", 0, n=n, run="ref", r=r)
-    for d in sorted(glob.glob(os.path.join(SIM, "runs", "odil*_rig_r*"))):
-        m = re.match(r"(odil\d+)_rig_r(\d+)$", os.path.basename(d))
-        if m and os.path.exists(os.path.join(d, "odil_policy.npz")):
+    pre = r"(?:\w+_)?" if runs else ""                 # session 1 names are untagged
+    if not runs:
+        test(rig, ODILCtl(os.path.join(SIM, "runs", "odil_v11", "odil_policy.npz")), "ref_odil_v11_sim", 0, n=n, run="ref", r=r)
+        test(rig, SimPPOCtl(os.path.join(SIM, "runs", "plate_goal_v3", "policy_final.npz")), "ref_ppo_v3_sim", 0, n=n, run="ref", r=r)
+    for d in sorted(glob.glob(os.path.join(SIM, "runs", "*odil*_rig_r*"))):
+        m = re.match(rf"({pre}odil\d+)_rig_r(\d+)$", os.path.basename(d))
+        if m and (not runs or m.group(1) in runs) and os.path.exists(os.path.join(d, "odil_policy.npz")):
             test(rig, ODILCtl(os.path.join(d, "odil_policy.npz")), "odil", 30.0 * (int(m.group(2)) + 1), n=n,
                  run=m.group(1), r=r)
     for d in sorted(glob.glob(os.path.join(SIM, "runs", "*_rig"))):
-        m = re.match(r"((sac|ppo)\d+)_rig$", os.path.basename(d))
-        if not m:
+        m = re.match(rf"({pre}(sac|ppo)\d+)_rig$", os.path.basename(d))
+        if not m or (runs and m.group(1) not in runs):
             continue
         ck = sorted(((int(re.search(r"_(\d+)min", p).group(1)), p) for p in glob.glob(os.path.join(d, "*min.zip"))))
+        if mins:
+            ck = [c for c in ck if c[0] in mins]
         if len(ck) > max_per_run:                      # evenly spread, always the last one
             idx = sorted(set(np.linspace(0, len(ck) - 1, max_per_run).round().astype(int)))
             ck = [ck[i] for i in idx]
@@ -900,6 +906,8 @@ def main():
     ap.add_argument("--sac-hours", type=float, default=6)
     ap.add_argument("--sac-test-min", type=float, default=30)
     ap.add_argument("--retest-mm", type=float, default=5)
+    ap.add_argument("--retest-runs", default="", help="only these runs, e.g. s2c_sac1,s2c_odil1")
+    ap.add_argument("--retest-min", default="", help="only these RL checkpoints (rig min), e.g. 60,120")
     # session 1 used 300k (= ~172 min of driving, from rl_sim/train_sac.py) and declined after ~240 min;
     # 1M is the stable-baselines3 default (~575 min) -> tests whether FIFO forgetting caused it
     ap.add_argument("--sac-buffer", type=int, default=1_000_000)
@@ -939,7 +947,9 @@ def main():
             elif phase == "demo":
                 demo(rig, a.dry)
             elif phase == "retest":
-                retest(rig, a.retest_mm / 1000.0, a.dry)
+                retest(rig, a.retest_mm / 1000.0, a.dry,
+                       runs=[s for s in a.retest_runs.split(",") if s] or None,
+                       mins=[int(s) for s in a.retest_min.split(",") if s] or None)
             elif phase in ("sac", "ppo"):
                 hours = a.sac_hours if phase == "sac" else a.ppo_hours
                 rl(rig, phase, hours, a.sac_test_min if phase == "sac" else a.ppo_test_min, rng, a.dry, run)

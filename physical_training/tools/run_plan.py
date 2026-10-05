@@ -32,6 +32,10 @@ RECOVERABLE = ("relevel failed", "3000 ticks from the session start")
 # step = (name, base args, the RL run it may resume, algo)
 STEPS = [
     ("session2c", ["--plan", "sac,odil", "--sac-hours", "10", "--tag", "s2c"], "s2c_sac1", "sac"),
+    # 2026-10-05 (user: "after odil it runs like that in that order"): 5 mm precision retest of session 2
+    # while the rig is as it was in training; no checkpoint to resume -> a recoverable stop reruns it
+    ("retest_s2c", ["--plan", "retest", "--retest-mm", "5", "--tag", "s2c",
+                    "--retest-runs", "s2c_sac1,s2c_odil1", "--retest-min", "60,120,300,600"], None, None),
     ("ppo_extension", ["--plan", "ppo", "--ppo-hours", "24"], "ppo1", "ppo"),
 ]
 
@@ -112,7 +116,9 @@ def run_step(name, args, run, algo, first_attempt_running=False, resume=None):
             log({"event": "plan stopped", "step": name, "why": f"levelling failed {res}", "recoveries": n_rec})
             return False
         in_odil = any(r.get("event") == "phase" and "odil" in str(r.get("run")) for r in ev)
-        if in_odil:                                      # ODIL rounds cannot resume: redo ODIL under a new tag
+        if run is None:                                  # a retest: run it again (recordings are never overwritten)
+            resume = None
+        elif in_odil:                                    # ODIL rounds cannot resume: redo ODIL under a new tag
             odil_retry += 1
             args = ["--plan", "odil", "--tag", f"s2c_odilretry{odil_retry}"]
             resume = None
