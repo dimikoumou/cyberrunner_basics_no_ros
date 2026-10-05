@@ -27,7 +27,7 @@ LOG = os.path.join(ROOT, "phase3_logs", "rig_learn.jsonl")
 RUNS = os.path.join(ROOT, "rl_sim", "runs")
 DATA = os.path.join(PT, "data")
 MAX_RECOVER = 10
-RECOVERABLE = ("relevel failed", "3000 ticks from the session start")
+RECOVERABLE = ("relevel failed", "3000 ticks from the session start", "ball stuck at a marker")
 
 # step = (name, base args, the RL run it may resume, algo)
 STEPS = [

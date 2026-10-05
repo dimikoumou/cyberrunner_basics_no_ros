@@ -261,6 +261,12 @@ class Rig:
         # a frame or two without the ball (camera hiccup, edge) is not a lost ball: hold the last
         # position; only 10 misses in a row (1/3 s) count as lost (the dry run lost 6 of 6 trips)
         pos_ = np.array(obs[:2], float)
+        # 2026-10-05: a ball resting ON a corner marker freezes the tilt reading (marker guard) at the
+        # last tilt -- there, towards the corner -- and the plate holds it: the ball stayed pinned 2 h
+        # (PPO 725.8-839.4 rig min). 60 s at a marker -> a recoverable stop (camera levelling rolls it off)
+        self.at_marker_t = getattr(self, "at_marker_t", 0.0) + DT if getattr(self.env, "ball_at_marker", False) else 0.0
+        if self.at_marker_t > 60.0:
+            self.shutdown("ball stuck at a marker 60 s")
         if found:
             self.miss, self.last_pos = 0, pos_
             self.last_vel = np.array(obs[2:4], float)

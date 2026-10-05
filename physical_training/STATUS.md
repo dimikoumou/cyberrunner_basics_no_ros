@@ -6,9 +6,10 @@
 `tools/run_plan.py --from ppo_extension` (detached, log `data/run_plan.log`):
 1. Done: **session 2c** (SAC 600 rig min 30/30; ODIL 3 rounds 28/24/25 of 30) and the **5 mm retest of
    session 2** (SAC 7/18/28/29 of 30 at 60/120/300/600 min; ODIL 17/25/25).
-2. **PPO extension** running: `ppo1` to 1440 rig min (~1.4 wall min per rig min), resumed at 725.8 min after
-   a manual camera levelling. ETA Tue ~09:30. Restart after a recovery with `--from ppo_extension`
-   (it resumes from `ppo_latest`).
+2. **PPO extension** running: `ppo1` to 1440 rig min (~1.4 wall min per rig min). Rolled back to
+   `ppo_720min.zip` on 10-05 18:50 (720-851.7 aborted: ball pinned on a corner marker, see REPORT 13a).
+   ETA Tue ~11:45. Restart after a recovery with `--from ppo_extension` (it resumes from `ppo_latest`).
+   A ball 60 s at a marker now stops the session (recoverable: run_plan levels, rolls it off, resumes).
 
 Recoverable stops (re-level failed, 3000-tick limit) are handled by run_plan itself (fresh camera
 levelling + resume, event `auto-resume`). Anything else ends the plan with the plate held
