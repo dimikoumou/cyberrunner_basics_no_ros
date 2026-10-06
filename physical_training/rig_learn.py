@@ -719,9 +719,9 @@ def retest(rig, r, dry, max_per_run=12, runs=None, mins=None):
             idx = sorted(set(np.linspace(0, len(ck) - 1, max_per_run).round().astype(int)))
             ck = [ck[i] for i in idx]
         algo = m.group(2)
-        for mins, p in ck:
+        for ck_min, p in ck:                           # (not `mins`: that is the filter for the next run)
             model = (SAC if algo == "sac" else PPO).load(p, device="cpu")
-            test(rig, SACCtl(model), algo, mins, n=n, run=m.group(1), r=r)
+            test(rig, SACCtl(model), algo, ck_min, n=n, run=m.group(1), r=r)
 
 
 # ---- demo: real camera footage of the controllers -----------------------------------------------
