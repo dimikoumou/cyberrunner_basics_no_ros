@@ -10,6 +10,12 @@
    `ppo_720min.zip` on 10-05 18:50 (720-851.7 aborted: ball pinned on a corner marker, see REPORT 13a).
    ETA Tue ~11:45. Restart after a recovery with `--from ppo_extension` (it resumes from `ppo_latest`).
    A ball 60 s at a marker now stops the session (recoverable: run_plan levels, rolls it off, resumes).
+3. Queued after PPO (run_plan steps): `test_fitted` + `retest_fitted` (model-based baseline, 12 / 5 mm),
+   `retest_ppo` (5 mm at 780/1080/1440), repeats `s3_odil`, `s3_sac`, `s4_sac`, `s4_odil`, `retest_s34`,
+   `s3_ppo` (600 rig min). Roughly Tue 11:00 -> Wed ~18:00 (~30 h).
+4. Off the rig: `data/fitted_queue.sh` (log `data/fitted_queue.log`) trains the baseline in ODIL's fitted
+   physics (`rl_sim/train_fitted.py`, niced, one core): 2x SAC 500 k, 2x PPO 5 M steps, ETA Tue ~05:30.
+   Must be done before `test_fitted` starts.
 
 Recoverable stops (re-level failed, 3000-tick limit) are handled by run_plan itself (fresh camera
 levelling + resume, event `auto-resume`). Anything else ends the plan with the plate held

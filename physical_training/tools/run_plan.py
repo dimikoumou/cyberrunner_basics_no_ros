@@ -37,6 +37,24 @@ STEPS = [
     ("retest_s2c", ["--plan", "retest", "--retest-mm", "5", "--tag", "s2c",
                     "--retest-runs", "s2c_sac1,s2c_odil1", "--retest-min", "60,120,300,600"], None, None),
     ("ppo_extension", ["--plan", "ppo", "--ppo-hours", "24"], "ppo1", "ppo"),
+    # 2026-10-05 (user: "after ppo make it stronger"): 5 mm retest of the extended PPO, then repeats on the
+    # session-2c software so every method has 3 runs (s2c, s3, s4; PPO: ppo1 + s3_ppo1). SAC repeats run
+    # 240 rig min (s2c: 30/30 from 150 min); ODIL first in s3, SAC first in s4 (order balanced)
+    # model-based baseline (user: "training the physics model on the other stuff"): SAC/PPO trained in ODIL's
+    # fitted physics from s2c's 30 / 90 rig min (rl_sim/train_fitted.py), tested at 12 mm and at 5 mm
+    ("test_fitted", ["--plan", "retest", "--retest-mm", "12",
+                     "--retest-runs", "fit_s2c30_sac1,fit_s2c90_sac1,fit_s2c30_ppo1,fit_s2c90_ppo1"], None, None),
+    ("retest_fitted", ["--plan", "retest", "--retest-mm", "5",
+                       "--retest-runs", "fit_s2c30_sac1,fit_s2c90_sac1,fit_s2c30_ppo1,fit_s2c90_ppo1"], None, None),
+    ("retest_ppo", ["--plan", "retest", "--retest-mm", "5",
+                    "--retest-runs", "ppo1", "--retest-min", "780,1080,1440"], None, None),
+    ("s3_odil", ["--plan", "odil", "--tag", "s3"], None, "odil"),
+    ("s3_sac", ["--plan", "sac", "--sac-hours", "4", "--tag", "s3"], "s3_sac1", "sac"),
+    ("s4_sac", ["--plan", "sac", "--sac-hours", "4", "--tag", "s4"], "s4_sac1", "sac"),
+    ("s4_odil", ["--plan", "odil", "--tag", "s4"], None, "odil"),
+    ("retest_s34", ["--plan", "retest", "--retest-mm", "5",
+                    "--retest-runs", "s3_sac1,s3_odil1,s4_sac1,s4_odil1", "--retest-min", "60,120,240"], None, None),
+    ("s3_ppo", ["--plan", "ppo", "--ppo-hours", "10", "--tag", "s3"], "s3_ppo1", "ppo"),
 ]
 
 
@@ -123,12 +141,13 @@ def run_step(name, args, run, algo, first_attempt_running=False, resume=None):
         if lv.returncode != 0:
             log({"event": "plan stopped", "step": name, "why": f"levelling failed {res}", "recoveries": n_rec})
             return False
-        in_odil = any(r.get("event") == "phase" and "odil" in str(r.get("run")) for r in ev)
-        if run is None:                                  # a retest: run it again (recordings are never overwritten)
-            resume = None
-        elif in_odil:                                    # ODIL rounds cannot resume: redo ODIL under a new tag
+        in_odil = algo == "odil" or any(r.get("event") == "phase" and "odil" in str(r.get("run")) for r in ev)
+        if in_odil:                                      # ODIL rounds cannot resume: redo ODIL under a new tag
             odil_retry += 1
-            args = ["--plan", "odil", "--tag", f"s2c_odilretry{odil_retry}"]
+            tag = args[args.index("--tag") + 1].split("_odilretry")[0] if "--tag" in args else "s2c"
+            args = ["--plan", "odil", "--tag", f"{tag}_odilretry{odil_retry}"]
+            resume = None
+        elif run is None:                                # a retest: run it again (recordings are never overwritten)
             resume = None
         else:
             resume = latest_checkpoint(run, algo)
