@@ -175,6 +175,8 @@ def main():
             first = latest_checkpoint(run, algo)
             if first is None or first[1] < 600:
                 first = (os.path.join(RUNS, "ppo1_rig", "ppo_600min.zip"), 600)
+        elif run is not None and algo in ("sac", "ppo"):   # a restarted RL step goes on from its latest save
+            first = latest_checkpoint(run, algo)
         ok = run_step(name, args, run, algo, first_attempt_running=(i == 0 and already), resume=first)
         if not ok:
             return
