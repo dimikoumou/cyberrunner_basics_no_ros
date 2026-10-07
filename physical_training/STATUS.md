@@ -17,7 +17,10 @@
    physics (`rl_sim/train_fitted.py`, niced, one core): 2x SAC 500 k, 2x PPO 5 M steps, ETA Tue ~05:30.
    Must be done before `test_fitted` starts.
 
-**When the plan finishes (user, 2026-10-06): start automatically on the most important deliverable -- a
+**2026-10-07 14:24: the plan FINISHED (all steps). Nothing runs on the rig; plate held level. Advisor report
+written: https://claude.ai/code/artifact/bd187982-2e14-4986-b778-577de74b7b0f (results also in REPORT.md 12.4).**
+
+(Earlier instruction, done:) **When the plan finishes (user, 2026-10-06): start automatically on the most important deliverable -- a
 report to the user's advisor of everything done in part 3** (setup, safety engineering, methods, every
 experiment and result incl. the model-based baseline and the repeats, the protocol-change log, honest
 limitations, next steps). Then figures, REPORT.md, overview, the D'Andrea report.

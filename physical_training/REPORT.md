@@ -604,6 +604,38 @@ breakaway angle. SAC's reward pulls toward the centre at every step ($-d/0.1$), 
 sharper. An earlier explanation (that ODIL is trained to rest anywhere within $R/2$) applied only to
 ODIL v7, not to the version used here.
 
+### 12.4 Final results: three runs per method, PPO 24 h, model-based baseline (2026-10-04 to 10-07)
+
+Final software (from session 2c: dip twitch, marker stop, plausibility 4 deg/10 frames, SAC memory 1 M).
+Runs: s2c, s3, s4 for ODIL and SAC; PPO `ppo1` (to 1440 rig min, earlier software up to 600) and `s3_ppo1`
+(to 600). Mean over runs, range in brackets, targets reached of 30. Advisor report with the learning-curve
+figure: https://claude.ai/code/artifact/bd187982-2e14-4986-b778-577de74b7b0f
+
+| Controller | Rig min | Runs | 12 mm test | 5 mm test | Jerk (median) |
+|---|---|---|---|---|---|
+| ODIL | 30 | 3 | 26.0 (24-28) | 23.0 (17-27) | 0.0026-0.0055 |
+| ODIL | 90 | 3 | 25.0 (23-27) | 26.0 (25-27) | 0.0026-0.0033 |
+| SAC | 60 | 3 | 27.0 (25-29) | 13.3 (7-20) | ~0.017 |
+| SAC | 120 | 3 | 29.3 (29-30) | 23.0 (18-28) | ~0.017 |
+| SAC | 240-300 | 3 | 30.0 (30-30) | 28.3 (27-30) | ~0.018 |
+| PPO | 600 | 2 | 26.0 (23-29) | 24 (1 run) | 0.018-0.019 |
+| PPO | 1440 | 1 | 27 | 19 | 0.019 |
+| PPO in ODIL's fitted model | 30 (data) | 1 | 28 (retest 27) | 17 | 0.019 |
+| PPO in ODIL's fitted model | 90 (data) | 1 | 30 | 18 | 0.017 |
+| SAC in ODIL's fitted model | 30 (data) | 1 | 16 | 13 | 0.016 |
+| SAC in ODIL's fitted model | 90 (data) | 1 | 14 | 18 | 0.016-0.019 |
+
+- ODIL 12 mm per run (30/60/90): s2c 28/24/25, s3 26/26/23, s4 24/**9**/27. The s4 60-min test is left out of
+  the means: the first 9 targets were reached, then the ball rested in the taped-over hole for the other 21
+  (40 dip twitches could not free it under ODIL's gentle commands); the same controller scored 27/30 at 5 mm.
+- SAC 12 mm per run (30/60/120/240): s2c 15/25/29/30, s3 23/29/30/30, s4 19/27/29/30.
+- PPO 12 mm: `ppo1` 23/25/19/29/27 at 60/120/240/600/1440 (22-30 between 780 and 1440); `s3_ppo1`
+  14/28/29/23 at 60/120/240/600.
+- Model-based baseline: `rl_sim/train_fitted.py` (SAC 500 k, PPO 5 M simulated steps, rig settings, physics =
+  ODIL's s2c fit after round 0 / round 2 with ODIL's randomisation widths); no breakaway boost.
+- Interpretation: most of the rig-time saving comes from fitting a model (PPO in the model matches ODIL at 12 mm);
+  ODIL adds ~5x smoother commands and better 5 mm precision; SAC in the same model fails with its rig settings.
+
 ## 13. Follow-up experiments (queued)
 
 | Order | Experiment | Rig time | Purpose |
