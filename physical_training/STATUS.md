@@ -17,6 +17,11 @@
    physics (`rl_sim/train_fitted.py`, niced, one core): 2x SAC 500 k, 2x PPO 5 M steps, ETA Tue ~05:30.
    Must be done before `test_fitted` starts.
 
+**When the plan finishes (user, 2026-10-06): start automatically on the most important deliverable -- a
+report to the user's advisor of everything done in part 3** (setup, safety engineering, methods, every
+experiment and result incl. the model-based baseline and the repeats, the protocol-change log, honest
+limitations, next steps). Then figures, REPORT.md, overview, the D'Andrea report.
+
 Recoverable stops (re-level failed, 3000-tick limit) are handled by run_plan itself (fresh camera
 levelling + resume, event `auto-resume`). Anything else ends the plan with the plate held
 (event `plan stopped`).
