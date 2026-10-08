@@ -4,6 +4,8 @@ Read these before working here:
 
 - **[`physical_training/STATUS.md`](physical_training/STATUS.md) -- what is running on the rig right now and how to
   check or recover it. Read this first.**
+- **[`docs/PROJECT_SUMMARY.md`](docs/PROJECT_SUMMARY.md) -- the whole project (parts 1-3) on two pages: results,
+  the honest paper claim, next steps, rules. Advisor report: https://claude.ai/code/artifact/bd187982-2e14-4986-b778-577de74b7b0f**
 
 - **[`docs/ODIL_REPORT.md`](docs/ODIL_REPORT.md)** -- everything done with ODIL: balancing vs RL,
   path tracking, the real maze (solved 3 times), the learning loop, reliability tools, safety
