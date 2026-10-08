@@ -34,7 +34,8 @@ levelling + resume, event `auto-resume`). Anything else ends the plan with the p
 tail -5 phase3_logs/rig_learn.jsonl            # last events (tests, auto-resume, plan stopped/finished)
 pgrep -fl "rig_learn|run_plan"                 # still running?
 ```
-Live view: http://100.67.4.122:8001/?k=5kJvVEtywQeB
+Live view: the address and access key are not kept in this repo. Start it on the rig computer with
+`python3 rl_hw/remote_view.py <key> <port>` and open `http://<that computer's address>:<port>/?k=<key>`.
 
 ## If the plan stopped
 1. Read the `why` of the last `shutdown` / `plan stopped` event.
