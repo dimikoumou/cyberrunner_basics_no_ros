@@ -1,0 +1,23 @@
+{
+ "odil_fit": {
+  "t": 1791220757.452097,
+  "event": "odil fitted+trained",
+  "run": "s2c_odil1",
+  "round": 2,
+  "rig_minutes": 90.0,
+  "k_acc": 0.09895210118613565,
+  "a_roll": 0.030637650675794745,
+  "tau_s": [
+   0.08045977011494251,
+   0.034482758620689655
+  ],
+  "breakaway_deg": 1.891957697564807,
+  "train_minutes": 11.9,
+  "ok": true
+ },
+ "algo": "ppo",
+ "steps": 5000000,
+ "seed": 4244,
+ "started": 1791270480.23157,
+ "train_minutes": 97.2
+}
